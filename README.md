@@ -116,6 +116,29 @@ Handles system deps, Python venv, bitnet.cpp build, model download, directory
 structure, and systemd services. Works on Linux (x86_64, ARM64) and macOS
 (Intel, Apple Silicon). See `--help` for options.
 
+## License
+
+This project is licensed under the **GNU Affero General Public License v3.0**
+(AGPL-3.0). See [LICENSE](LICENSE) for the full text.
+
+### Third-Party Model Licenses
+
+The AI models used by this project are **not distributed as part of this
+software** — they are downloaded separately at build time. Each model is
+governed by its own license:
+
+| Model | Provider | License | Notes |
+|---|---|---|---|
+| BitNet b1.58 2B4T | Microsoft | MIT | Fully permissive |
+| Falcon3 10B / 3B / 1B | TII | [TII Falcon-LLM License 2.0](https://falconllm.tii.ae/falcon-terms-and-conditions.html) | Requires written permission from TII for hosting use; has an Acceptable Use Policy |
+| Qwen 3.5 9B | Alibaba / Qwen | Apache 2.0 | Fully permissive |
+| nomic-embed-text-v1.5 | Nomic AI | Apache 2.0 | Fully permissive |
+
+> **Note:** The TII Falcon-LLM License 2.0 is not an OSI-approved open source
+> license. If you plan to host Falcon3 models as a service, review the license
+> terms and contact TII for permission. The other models (BitNet, Qwen, nomic)
+> have no such restrictions.
+
 ## Status
 
 - [ ] 1TB drive partitioned and mounted at `/knowledge`
