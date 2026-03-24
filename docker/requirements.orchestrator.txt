@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+qdrant-client
+sentence-transformers
+requests
+beautifulsoup4
+tqdm
+openai

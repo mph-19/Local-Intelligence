@@ -1,0 +1,9 @@
+# Don't send large/unnecessary files to Docker build context
+.git
+data/
+*.zim
+*.gguf
+__pycache__
+*.pyc
+.env
+*.log

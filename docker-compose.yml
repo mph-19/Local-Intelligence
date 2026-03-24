@@ -1,0 +1,190 @@
+# Local Intelligence — Docker Compose
+#
+# Profiles control which LLM services start:
+#   cpu      Falcon3 10B only (CPU, default)
+#   gpu      Qwen 3.5 9B only (NVIDIA GPU)
+#   dual     Falcon3 triage (CPU) + Qwen synthesis (GPU)
+#   minimal  Falcon3 3B (CPU, <8GB RAM machines)
+#
+# Set via COMPOSE_PROFILES in .env or: docker compose --profile dual up -d
+#
+# Usage:
+#   make up                         # start with configured profile
+#   make logs                       # watch all logs
+#   make ingest-docs                # index your documents
+#   make down                       # stop everything
+#
+# First run builds images (~15-30 min). Subsequent starts are instant.
+#
+# Requirements:
+#   - Copy .env.example to .env and run: make setup (or edit manually)
+#   - cpu/minimal: 8-12 GB RAM
+#   - gpu: NVIDIA GPU with 8+ GB VRAM, nvidia-container-toolkit
+#   - dual: both of the above
+
+services:
+
+  # ── Falcon3 — CPU inference (bitnet.cpp) ───────────────────────
+  # Used as sole LLM in "cpu" profile, or as fast triage in "dual".
+  falcon3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.falcon3
+    ports:
+      - "${LLM_PORT:-8080}:8080"
+    environment:
+      - CTX_SIZE=${FALCON_CTX_SIZE:-32768}
+      - THREADS=${THREADS:-0}
+    profiles: ["cpu", "dual"]
+    deploy:
+      resources:
+        limits:
+          memory: ${FALCON_MEM_LIMIT:-12g}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/models || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── Falcon3 3B — lightweight CPU inference for low-RAM machines ─
+  falcon3-mini:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.falcon3
+      args:
+        MODEL_REPO: tiiuae/Falcon3-3B-Instruct-1.58bit
+    ports:
+      - "${LLM_PORT:-8080}:8080"
+    environment:
+      - CTX_SIZE=${FALCON_CTX_SIZE:-8192}
+      - THREADS=${THREADS:-0}
+    profiles: ["minimal"]
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/models || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── Qwen 3.5 9B — GPU inference (llama.cpp + CUDA) ────────────
+  # Used as sole LLM in "gpu" profile, or as synthesizer in "dual".
+  qwen:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.qwen
+    ports:
+      - "${SYNTH_PORT:-8082}:8082"
+    environment:
+      - CTX_SIZE=${QWEN_CTX_SIZE:-8192}
+      - GPU_LAYERS=${QWEN_GPU_LAYERS:-99}
+    profiles: ["gpu", "dual"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8082/v1/models || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s    # model load + CUDA init
+
+  # ── Orchestrator — RAG-augmented proxy ──────────────────────────
+  # Adapts to available LLMs via PIPELINE_MODE env var.
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
+      target: orchestrator
+    ports:
+      - "${ORCHESTRATOR_PORT:-8081}:8081"
+    volumes:
+      - ${KNOWLEDGE_DIR:-./data/knowledge}:/knowledge
+    environment:
+      - PIPELINE_MODE=${PIPELINE_MODE:-single}
+      - LLM_URL=${LLM_URL:-http://falcon3:8080/v1/chat/completions}
+      - TRIAGE_LLM_URL=${TRIAGE_LLM_URL:-}
+      - SYNTH_LLM_URL=${SYNTH_LLM_URL:-}
+      - KIWIX_URL=http://kiwix:8888
+      - ORCHESTRATOR_PORT=8081
+      - QDRANT_PATH=/knowledge/vectors/qdrant
+      - RAG_TOP_K=${RAG_TOP_K:-5}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/v1/models || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s    # nomic model loads on first start
+
+  # ── Kiwix — offline knowledge bases ─────────────────────────────
+  kiwix:
+    image: ghcr.io/kiwix/kiwix-serve:latest
+    ports:
+      - "${KIWIX_PORT:-8888}:8888"
+    volumes:
+      - ${KNOWLEDGE_DIR:-./data/knowledge}:/knowledge
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Auto-generate library XML from any ZIM files present
+        if [ ! -f /knowledge/kiwix-library.xml ] && ls /knowledge/zim/*.zim >/dev/null 2>&1; then
+          echo "Auto-generating kiwix-library.xml..."
+          for zim in /knowledge/zim/*.zim; do
+            kiwix-manage /knowledge/kiwix-library.xml add "$$zim" 2>/dev/null || true
+          done
+        fi
+        if [ -f /knowledge/kiwix-library.xml ]; then
+          exec kiwix-serve --library /knowledge/kiwix-library.xml --port 8888 --nodatealias
+        else
+          echo "No ZIM files found in /knowledge/zim/ — Kiwix idle."
+          echo "Download ZIMs, then restart: docker compose restart kiwix"
+          sleep infinity
+        fi
+    restart: unless-stopped
+
+  # ── Open WebUI — chat interface ─────────────────────────────────
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "${WEBUI_PORT:-3000}:8080"
+    environment:
+      - OPENAI_API_BASE_URL=http://orchestrator:8081/v1
+      - OPENAI_API_KEY=local
+      - WEBUI_AUTH=true
+    volumes:
+      - webui-data:/app/backend/data
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Ingestion worker (run manually, not always-on) ──────────────
+  ingest:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
+      target: ingest
+    volumes:
+      - ${KNOWLEDGE_DIR:-./data/knowledge}:/knowledge
+    environment:
+      - QDRANT_PATH=/knowledge/vectors/qdrant
+      - KIWIX_URL=http://kiwix:8888
+    depends_on:
+      - kiwix
+    profiles:
+      - tools
+
+volumes:
+  webui-data:

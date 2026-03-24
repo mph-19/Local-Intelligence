@@ -1,0 +1,82 @@
+# Falcon3 (1.58-bit) — CPU-only inference server
+# Multi-stage build: compile bitnet.cpp in a fat image, run in a slim one.
+#
+# Build args:
+#   MODEL_REPO   HuggingFace repo (default: tiiuae/Falcon3-10B-Instruct-1.58bit)
+#   MODEL_QUANT  Quantization type (default: i2_s)
+#
+# Also works with smaller models:
+#   docker build --build-arg MODEL_REPO=tiiuae/Falcon3-3B-Instruct-1.58bit .
+#   docker build --build-arg MODEL_REPO=tiiuae/Falcon3-1B-Instruct-1.58bit .
+
+# ── Stage 1: Build ───────────────────────────────────────────────────
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang-18 \
+    cmake \
+    git \
+    python3 \
+    python3-pip \
+    python3-venv \
+    wget \
+    build-essential \
+    && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN git clone --recursive https://github.com/microsoft/BitNet.git .
+
+RUN pip install --break-system-packages -r requirements.txt
+
+ARG MODEL_REPO=tiiuae/Falcon3-10B-Instruct-1.58bit
+ARG MODEL_QUANT=i2_s
+
+RUN python3 setup_env.py --hf-repo ${MODEL_REPO} -q ${MODEL_QUANT}
+
+# Find the actual model path (varies by MODEL_REPO) and write it to a file
+RUN find /build/models -name "ggml-model-*.gguf" -type f | head -1 > /build/model_path.txt
+
+# Collect all shared libraries llama-server needs into one directory
+RUN mkdir -p /build/libs && \
+    find /build/build -name "*.so*" -exec cp {} /build/libs/ \; 2>/dev/null; \
+    true
+
+# ── Stage 2: Runtime ─────────────────────────────────────────────────
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/build/bin/llama-server /usr/local/bin/llama-server
+COPY --from=builder /build/models/ /models/
+COPY --from=builder /build/model_path.txt /model_path.txt
+COPY --from=builder /build/libs/ /usr/local/lib/
+RUN ldconfig
+
+# Rewrite the model path to point at /models/ instead of /build/models/
+RUN sed -i 's|/build/models/|/models/|' /model_path.txt
+
+EXPOSE 8080
+
+ENV CTX_SIZE=32768
+ENV THREADS=0
+ENV PORT=8080
+
+# Entrypoint reads the model path dynamically — works with any MODEL_REPO
+ENTRYPOINT ["sh", "-c", \
+    "exec llama-server \
+        --model $(cat /model_path.txt) \
+        --host 0.0.0.0 \
+        --port ${PORT} \
+        --n-gpu-layers 0 \
+        --ctx-size ${CTX_SIZE} \
+        --threads ${THREADS}"]

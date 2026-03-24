@@ -1,0 +1,55 @@
+# ── Secrets & environment ─────────────────────────────────────────
+# .env contains real config (ports, keys, profile). Track .env.example instead.
+.env
+
+# ── Model weights & large binaries ───────────────────────────────
+# These are multi-GB files that should never enter version control.
+# Download them at deploy time via Dockerfiles or install scripts.
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# ── Kiwix ZIM files ──────────────────────────────────────────────
+# Offline knowledge bases — often 1-50+ GB each.
+*.zim
+
+# ── Data directory ───────────────────────────────────────────────
+# Runtime data: vectors, knowledge bases, ingested documents.
+# Populated at deploy time, not part of the source tree.
+data/
+
+# ── Python ───────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# ── Docker ───────────────────────────────────────────────────────
+# Named volume data managed by Docker, not checked in.
+# (webui-data volume lives outside the project tree already)
+
+# ── Logs & runtime ───────────────────────────────────────────────
+*.log
+*.pid
+*.sock
+
+# ── OS-generated ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Editors & IDEs ───────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

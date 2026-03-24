@@ -1,0 +1,82 @@
+# Qwen 3.5 9B — GPU inference server (CUDA + llama.cpp)
+# Multi-stage build: compile llama.cpp with CUDA in a fat image, run in a slim one.
+#
+# Build args:
+#   MODEL_REPO    HuggingFace repo (default: unsloth/Qwen3.5-9B-GGUF)
+#   MODEL_FILE    GGUF filename  (default: Qwen3.5-9B-Q4_K_M.gguf)
+#
+# Higher quality (needs more VRAM):
+#   docker compose build --build-arg MODEL_FILE=Qwen3.5-9B-Q5_K_M.gguf qwen
+#
+# Lower VRAM (~3.5 GB):
+#   docker compose build --build-arg MODEL_FILE=Qwen3.5-9B-Q2_K.gguf qwen
+
+# ── Stage 1: Build llama.cpp with CUDA ─────────────────────────────
+FROM nvidia/cuda:12.4.1-devel-ubuntu24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    git \
+    python3 \
+    python3-pip \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN git clone https://github.com/ggerganov/llama.cpp.git . && \
+    cmake -B build \
+        -DGGML_CUDA=ON \
+        -DCMAKE_CUDA_ARCHITECTURES="86" \
+        -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build --target llama-server -j"$(nproc)"
+
+# ── Stage 2: Download model ────────────────────────────────────────
+FROM python:3.12-slim AS downloader
+
+RUN pip install --no-cache-dir huggingface-hub
+
+ARG MODEL_REPO=unsloth/Qwen3.5-9B-GGUF
+ARG MODEL_FILE=Qwen3.5-9B-Q4_K_M.gguf
+
+RUN huggingface-cli download "${MODEL_REPO}" "${MODEL_FILE}" \
+    --local-dir /models
+
+# Write the filename so the entrypoint can find it
+RUN echo "/models/${MODEL_FILE}" > /model_path.txt
+
+# ── Stage 3: Runtime ───────────────────────────────────────────────
+FROM nvidia/cuda:12.4.1-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy llama-server binary and its shared libs
+COPY --from=builder /build/build/bin/llama-server /usr/local/bin/llama-server
+COPY --from=builder /build/build/src/ /usr/local/lib/
+COPY --from=builder /build/build/ggml/src/ /usr/local/lib/
+RUN ldconfig 2>/dev/null; true
+
+# Copy model
+COPY --from=downloader /models/ /models/
+COPY --from=downloader /model_path.txt /model_path.txt
+
+EXPOSE 8082
+
+ENV CTX_SIZE=8192
+ENV PORT=8082
+ENV GPU_LAYERS=99
+
+ENTRYPOINT ["sh", "-c", \
+    "exec llama-server \
+        --model $(cat /model_path.txt) \
+        --host 0.0.0.0 \
+        --port ${PORT} \
+        --n-gpu-layers ${GPU_LAYERS} \
+        --ctx-size ${CTX_SIZE}"]
