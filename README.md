@@ -8,7 +8,7 @@ LLM inference — fronted by a reverse proxy and exposed through Open WebUI.
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USER/local-intelligence.git
+git clone https://github.com/mph-19/local-intelligence.git
 cd local-intelligence
 make setup          # detects your hardware, picks the right profile
 make build          # builds Docker images (15-30 min first time)
