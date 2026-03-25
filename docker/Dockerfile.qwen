@@ -26,12 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
+RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
+
 RUN git clone https://github.com/ggerganov/llama.cpp.git . && \
     cmake -B build \
         -DGGML_CUDA=ON \
         -DCMAKE_CUDA_ARCHITECTURES="86" \
-        -DCMAKE_BUILD_TYPE=Release && \
-    LIBRARY_PATH=/usr/local/cuda/lib64/stubs:$LIBRARY_PATH \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
+        -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs" && \
     cmake --build build --target llama-server -j"$(nproc)"
 
 # ── Stage 2: Download model ────────────────────────────────────────
