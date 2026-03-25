@@ -20,8 +20,10 @@ restart: ## Restart all services
 	$(COMPOSE) restart
 
 .PHONY: build
-build: ## Build/rebuild all images
-	$(COMPOSE) build
+build: ## Build/rebuild all images (sequentially to avoid OOM)
+	$(COMPOSE) build falcon3
+	$(COMPOSE) build qwen
+	$(COMPOSE) build orchestrator
 
 .PHONY: pull
 pull: ## Pull latest pre-built images (kiwix, open-webui)

@@ -9,6 +9,7 @@ Pipeline modes:
 """
 
 import json, sys, time, uuid, os
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI
@@ -102,26 +103,29 @@ def retrieve(query: str, collections: list[str], top_k: int = RAG_TOP_K) -> list
     if not any(c in available for c in collections):
         available = get_available_collections(force_refresh=True)
 
-    all_results = []
-    for collection in collections:
-        if collection not in available:
-            continue
+    def search_collection(collection: str) -> list[dict]:
         try:
             results = qdrant.search(
                 collection_name=collection,
                 query_vector=query_vec,
                 limit=top_k,
             )
-            for r in results:
-                all_results.append({
-                    "text": r.payload["text"],
-                    "source": r.payload.get("title", r.payload.get("file", "unknown")),
-                    "url": r.payload.get("url", ""),
-                    "score": r.score,
-                    "collection": collection,
-                })
+            return [{
+                "text": r.payload["text"],
+                "source": r.payload.get("title", r.payload.get("file", "unknown")),
+                "url": r.payload.get("url", ""),
+                "score": r.score,
+                "collection": collection,
+            } for r in results]
         except Exception as e:
             print(f"RAG error ({collection}): {e}")
+            return []
+
+    targets = [c for c in collections if c in available]
+    all_results = []
+    with ThreadPoolExecutor(max_workers=len(targets) or 1) as pool:
+        for hits in pool.map(search_collection, targets):
+            all_results.extend(hits)
 
     all_results.sort(key=lambda x: x["score"], reverse=True)
     return all_results[:top_k]
@@ -139,27 +143,28 @@ def kiwix_fallback(query: str, top_k: int = 3) -> list[dict]:
 
     soup = BeautifulSoup(resp.text, "html.parser")
     links = soup.select("article a[href]")
-    results = []
 
-    for link in links[:top_k]:
+    def fetch_article(link) -> dict | None:
         href = link.get("href", "").lstrip("/")
         title = link.get_text(strip=True)
         try:
             article = requests.get(f"{KIWIX_URL}/{href}", timeout=15)
             if article.status_code != 200:
-                continue
+                return None
             text = BeautifulSoup(article.text, "html.parser").get_text(" ", strip=True)
-            # Take first ~2000 words as context (avoid flooding the window)
             words = text.split()[:2000]
-            results.append({
+            return {
                 "text": " ".join(words),
                 "source": title,
                 "url": f"{KIWIX_URL}/{href}",
-                "score": 0.0,  # no vector score for fulltext hits
+                "score": 0.0,
                 "collection": "kiwix_fallback",
-            })
+            }
         except Exception:
-            continue
+            return None
+
+    with ThreadPoolExecutor(max_workers=top_k) as pool:
+        results = [r for r in pool.map(fetch_article, links[:top_k]) if r]
 
     return results
 
