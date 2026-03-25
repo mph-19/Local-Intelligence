@@ -12,7 +12,7 @@
 #   docker compose build --build-arg MODEL_FILE=Qwen3.5-9B-Q2_K.gguf qwen
 
 # ── Stage 1: Build llama.cpp with CUDA ─────────────────────────────
-FROM nvidia/cuda:12.4.1-devel-ubuntu24.04 AS builder
+FROM nvidia/cuda:12.6.1-devel-ubuntu24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -48,7 +48,7 @@ RUN huggingface-cli download "${MODEL_REPO}" "${MODEL_FILE}" \
 RUN echo "/models/${MODEL_FILE}" > /model_path.txt
 
 # ── Stage 3: Runtime ───────────────────────────────────────────────
-FROM nvidia/cuda:12.4.1-runtime-ubuntu24.04
+FROM nvidia/cuda:12.6.1-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
