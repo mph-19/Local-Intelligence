@@ -3,6 +3,7 @@ uvicorn
 pydantic
 qdrant-client
 sentence-transformers
+einops
 requests
 beautifulsoup4
 tqdm
