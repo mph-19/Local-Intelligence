@@ -106,6 +106,25 @@ chat: ## Quick test chat (usage: make chat Q="What is Linux?")
 		| python3 -m json.tool 2>/dev/null \
 		|| echo "Orchestrator not responding. Run: make up"
 
+# ── Maintenance ─────────────────────────────────────────────────────
+
+.PHONY: check-updates
+check-updates: ## Check all pinned dependencies for available updates
+	@bash scripts/check-updates.sh
+
+.PHONY: test
+test: ## Build and run a quick smoke test (health checks all services)
+	$(COMPOSE) build
+	$(COMPOSE) up -d
+	@echo "Waiting for services to start..."
+	@sleep 10
+	@$(MAKE) health
+	@echo ""
+	@echo "Smoke test: sending test query..."
+	@$(MAKE) chat Q="What is 2+2?" || true
+	@echo ""
+	@echo "Test complete. Run 'make down' to stop services."
+
 # ── Cleanup ──────────────────────────────────────────────────────────
 
 .PHONY: clean

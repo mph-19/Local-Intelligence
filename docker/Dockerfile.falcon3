@@ -9,7 +9,8 @@
 #   docker build --build-arg MODEL_REPO=tiiuae/Falcon3-3B-Instruct-1.58bit .
 #   docker build --build-arg MODEL_REPO=tiiuae/Falcon3-1B-Instruct-1.58bit .
 
-# ── Stage 1: Build ───────────────────────────────────────────────────
+# ── Stage 1: Build bitnet.cpp ──────────────────────────────────────────
+# Compiles the inference binary only — no model weights in this stage.
 FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -29,7 +30,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-RUN git clone --recursive https://github.com/microsoft/BitNet.git .
+# Pin to known-good commit to prevent upstream breaking changes.
+# To update: test a new commit locally, then replace the hash here.
+ARG BITNET_COMMIT=01eb415772c3
+RUN git clone --recursive https://github.com/microsoft/BitNet.git . && \
+    git checkout ${BITNET_COMMIT} && \
+    git submodule update --init --recursive
 
 # ── Patches for BitNet build issues ────────────────────────────────
 # Fix 1: Relax sentencepiece pin (0.2.0 fails on newer Python, 0.2.1+ works)
@@ -43,20 +49,22 @@ RUN sed -i 's/int8_t \* y_col = y + col \* by;/const int8_t * y_col = y + col * 
 RUN python3 -m venv /build/venv
 ENV PATH="/build/venv/bin:$PATH"
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 ARG MODEL_REPO=tiiuae/Falcon3-10B-Instruct-1.58bit
 ARG MODEL_QUANT=i2_s
 
 RUN python3 setup_env.py --hf-repo ${MODEL_REPO} -q ${MODEL_QUANT}
 
-# Find the actual model path (varies by MODEL_REPO) and write it to a file
-RUN find /build/models -name "ggml-model-*.gguf" -type f | head -1 > /build/model_path.txt
-
-# Collect all shared libraries llama-server needs into one directory
-RUN mkdir -p /build/libs && \
-    find /build/build -name "*.so*" -exec cp {} /build/libs/ \; 2>/dev/null; \
-    true
+# Collect only what the runtime needs, then delete everything else.
+# This drastically reduces the layer size BuildKit has to compress.
+RUN mkdir -p /output/libs && \
+    cp /build/build/bin/llama-server /output/ && \
+    find /build/build -name "*.so*" -exec cp {} /output/libs/ \; 2>/dev/null; true && \
+    find /build/models -name "ggml-model-*.gguf" -type f | head -1 > /output/model_path.txt && \
+    cp -r /build/models/ /output/models/ && \
+    rm -rf /build/.git /build/3rdparty /build/build /build/venv /build/src
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────
 FROM ubuntu:24.04
@@ -68,10 +76,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/build/bin/llama-server /usr/local/bin/llama-server
-COPY --from=builder /build/models/ /models/
-COPY --from=builder /build/model_path.txt /model_path.txt
-COPY --from=builder /build/libs/ /usr/local/lib/
+COPY --from=builder /output/llama-server /usr/local/bin/llama-server
+COPY --from=builder /output/models/ /models/
+COPY --from=builder /output/model_path.txt /model_path.txt
+COPY --from=builder /output/libs/ /usr/local/lib/
 RUN ldconfig
 
 # Rewrite the model path to point at /models/ instead of /build/models/

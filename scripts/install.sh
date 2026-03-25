@@ -247,7 +247,9 @@ build_bitnet() {
         ok "bitnet-cpp already cloned at $BITNET_DIR"
     else
         info "Cloning bitnet.cpp..."
+        BITNET_COMMIT="${BITNET_COMMIT:-01eb415772c3}"
         git clone --recursive https://github.com/microsoft/BitNet.git "$BITNET_DIR"
+        cd "$BITNET_DIR" && git checkout "$BITNET_COMMIT" && git submodule update --init --recursive && cd -
     fi
 
     cd "$BITNET_DIR"

@@ -28,19 +28,28 @@ WORKDIR /build
 
 RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
 
+# Pin to known-good commit to prevent upstream breaking changes.
+# To update: test a new commit locally, then replace the hash here.
+ARG LLAMACPP_COMMIT=9f102a1407ed
 RUN git clone https://github.com/ggerganov/llama.cpp.git . && \
+    git checkout ${LLAMACPP_COMMIT} && \
     cmake -B build \
         -DGGML_CUDA=ON \
         -DCMAKE_CUDA_ARCHITECTURES="86" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
         -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs" && \
-    cmake --build build --target llama-server -j"$(nproc)"
+    cmake --build build --target llama-server -j"$(nproc)" && \
+    mkdir -p /output/libs && \
+    cp build/bin/llama-server /output/ && \
+    find build -name "*.so*" -exec cp {} /output/libs/ \; 2>/dev/null; true && \
+    rm -rf /build/.git /build/build /build/src /build/ggml
 
 # ── Stage 2: Download model ────────────────────────────────────────
 FROM python:3.12-slim AS downloader
 
-RUN pip install --no-cache-dir huggingface-hub
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install huggingface-hub~=1.7.0
 
 ARG MODEL_REPO=unsloth/Qwen3.5-9B-GGUF
 ARG MODEL_FILE=Qwen3.5-9B-Q4_K_M.gguf
@@ -62,9 +71,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy llama-server binary and its shared libs
-COPY --from=builder /build/build/bin/llama-server /usr/local/bin/llama-server
-COPY --from=builder /build/build/src/ /usr/local/lib/
-COPY --from=builder /build/build/ggml/src/ /usr/local/lib/
+COPY --from=builder /output/llama-server /usr/local/bin/llama-server
+COPY --from=builder /output/libs/ /usr/local/lib/
 RUN ldconfig 2>/dev/null; true
 
 # Copy model

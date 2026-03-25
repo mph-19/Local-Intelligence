@@ -130,7 +130,7 @@ services:
 
   # ── Kiwix — offline knowledge bases ─────────────────────────────
   kiwix:
-    image: ghcr.io/kiwix/kiwix-serve:latest
+    image: ghcr.io/kiwix/kiwix-serve:3.8.2
     ports:
       - "${KIWIX_PORT:-8888}:8888"
     volumes:
@@ -156,7 +156,7 @@ services:
 
   # ── Open WebUI — chat interface ─────────────────────────────────
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:v0.8.9
     ports:
       - "${WEBUI_PORT:-3000}:8080"
     environment:

@@ -1,6 +1,9 @@
 # ── Secrets & environment ─────────────────────────────────────────
 # .env contains real config (ports, keys, profile). Track .env.example instead.
 .env
+*.token
+.huggingface/
+.netrc
 
 # ── Model weights & large binaries ───────────────────────────────
 # These are multi-GB files that should never enter version control.
