@@ -36,12 +36,12 @@ RUN git clone https://github.com/ggerganov/llama.cpp.git . && \
 # ── Stage 2: Download model ────────────────────────────────────────
 FROM python:3.12-slim AS downloader
 
-RUN pip install --no-cache-dir huggingface-hub
+RUN pip install --no-cache-dir huggingface-hub[cli]
 
 ARG MODEL_REPO=unsloth/Qwen3.5-9B-GGUF
 ARG MODEL_FILE=Qwen3.5-9B-Q4_K_M.gguf
 
-RUN huggingface-cli download "${MODEL_REPO}" "${MODEL_FILE}" \
+RUN python3 -m huggingface_hub.cli download "${MODEL_REPO}" "${MODEL_FILE}" \
     --local-dir /models
 
 # Write the filename so the entrypoint can find it
