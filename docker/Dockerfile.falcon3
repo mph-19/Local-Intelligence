@@ -31,7 +31,10 @@ WORKDIR /build
 
 RUN git clone --recursive https://github.com/microsoft/BitNet.git .
 
-RUN pip install --break-system-packages -r requirements.txt
+RUN python3 -m venv /build/venv
+ENV PATH="/build/venv/bin:$PATH"
+
+RUN pip install --no-cache-dir -r requirements.txt
 
 ARG MODEL_REPO=tiiuae/Falcon3-10B-Instruct-1.58bit
 ARG MODEL_QUANT=i2_s
