@@ -31,6 +31,15 @@ WORKDIR /build
 
 RUN git clone --recursive https://github.com/microsoft/BitNet.git .
 
+# ── Patches for BitNet build issues ────────────────────────────────
+# Fix 1: Relax sentencepiece pin (0.2.0 fails on newer Python, 0.2.1+ works)
+RUN sed -i 's/sentencepiece = ">=0.1.98,<=0.2.0"/sentencepiece = ">=0.1.98"/' \
+    3rdparty/llama.cpp/gguf-py/pyproject.toml 2>/dev/null; true
+
+# Fix 2: const-correctness error in ggml-bitnet-mad.cpp (Clang 18+ is stricter)
+RUN sed -i 's/int8_t \* y_col = y + col \* by;/const int8_t * y_col = y + col * by;/' \
+    src/ggml-bitnet-mad.cpp 2>/dev/null; true
+
 RUN python3 -m venv /build/venv
 ENV PATH="/build/venv/bin:$PATH"
 
