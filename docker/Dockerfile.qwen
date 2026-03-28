@@ -57,9 +57,6 @@ ARG MODEL_FILE=Qwen3.5-9B-Q4_K_M.gguf
 RUN python3 -c "from huggingface_hub import hf_hub_download; \
     hf_hub_download('${MODEL_REPO}', '${MODEL_FILE}', local_dir='/models')"
 
-# Write the filename so the entrypoint can find it
-RUN echo "/models/${MODEL_FILE}" > /model_path.txt
-
 # ── Stage 3: Runtime ───────────────────────────────────────────────
 FROM nvidia/cuda:12.6.1-runtime-ubuntu24.04
 
@@ -77,7 +74,15 @@ RUN ldconfig 2>/dev/null; true
 
 # Copy model
 COPY --from=downloader /models/ /models/
-COPY --from=downloader /model_path.txt /model_path.txt
+
+# Propagate model filename from build arg to runtime env.
+# This avoids shell command substitution ($(cat ...)) in the ENTRYPOINT.
+ARG MODEL_FILE=Qwen3.5-9B-Q4_K_M.gguf
+ENV MODEL_PATH=/models/${MODEL_FILE}
+
+# Non-root user — llama-server needs no write access
+RUN groupadd --gid 1000 llmuser && \
+    useradd --uid 1000 --gid 1000 --no-create-home llmuser
 
 EXPOSE 8082
 
@@ -85,9 +90,10 @@ ENV CTX_SIZE=8192
 ENV PORT=8082
 ENV GPU_LAYERS=99
 
+USER llmuser
 ENTRYPOINT ["sh", "-c", \
     "exec llama-server \
-        --model $(cat /model_path.txt) \
+        --model \"${MODEL_PATH}\" \
         --host 0.0.0.0 \
         --port ${PORT} \
         --n-gpu-layers ${GPU_LAYERS} \

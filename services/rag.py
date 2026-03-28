@@ -1,22 +1,68 @@
 #!/usr/bin/env python3
 """Shared RAG utilities: embedding, Qdrant client, chunking, retrieval."""
 
-import hashlib, uuid, os
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
+import uuid, os
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
 # --- Config ---
 QDRANT_PATH = os.environ.get("QDRANT_PATH", "/knowledge/vectors/qdrant")
+EMBED_MODEL = "nomic-ai/nomic-embed-text-v1.5"
+EMBED_REVISION = "e5cf08aadaa33385f5990def41f7a23405aec398"  # pin to audited commit
 CHUNK_SIZE = 400       # words
 CHUNK_OVERLAP = 50     # words
 
-# --- Init (runs once at import time) ---
-embedder = SentenceTransformer(
-    "nomic-ai/nomic-embed-text-v1.5",
-    trust_remote_code=True,
-)
-client = QdrantClient(path=QDRANT_PATH)
+# --- Lazy-loaded singletons ---
+# Initialized on first use so that:
+#   1. Importing rag.py for chunk_text()/deterministic_id() is free
+#   2. SentenceTransformer (~270 MB) only loads when embedding is needed
+#   3. QdrantClient only locks the database when vector ops start
+#   4. Transient HuggingFace outages don't crash the import
+
+_embedder = None
+_client = None
+
+def get_embedder():
+    """Return the SentenceTransformer, loading it on first call."""
+    global _embedder
+    if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+        _embedder = SentenceTransformer(
+            EMBED_MODEL,
+            trust_remote_code=True,
+            revision=EMBED_REVISION,
+        )
+        print("[rag] Embedding model loaded")
+    return _embedder
+
+def get_qdrant():
+    """Return the QdrantClient, creating it on first call."""
+    global _client
+    if _client is None:
+        from qdrant_client import QdrantClient
+        _client = QdrantClient(path=QDRANT_PATH)
+        print(f"[rag] Qdrant client initialized at {QDRANT_PATH}")
+    return _client
+
+# Backwards-compatible aliases for existing callers
+# (property-like access without changing every call site)
+class _LazyProxy:
+    """Transparent proxy that defers initialization to a factory function."""
+    def __init__(self, factory):
+        object.__setattr__(self, '_factory', factory)
+        object.__setattr__(self, '_obj', None)
+    def _get(self):
+        obj = object.__getattribute__(self, '_obj')
+        if obj is None:
+            obj = object.__getattribute__(self, '_factory')()
+            object.__setattr__(self, '_obj', obj)
+        return obj
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+    def __call__(self, *args, **kwargs):
+        return self._get()(*args, **kwargs)
+
+embedder = _LazyProxy(get_embedder)
+client = _LazyProxy(get_qdrant)
 
 # --- Embedding ---
 def embed_document(text: str) -> list[float]:
@@ -55,19 +101,51 @@ def ensure_collection(name: str):
 
 # --- Chunking ---
 def chunk_text(text: str) -> list[str]:
+    """Split text into overlapping chunks, preferring sentence boundaries.
+
+    Targets CHUNK_SIZE words per chunk.  When a split would fall mid-sentence,
+    scans backward (up to half the chunk) for sentence-ending punctuation and
+    snaps the boundary there.  Falls back to word-count boundary in text
+    without sentence structure (e.g. code blocks, lists).
+    """
     words = text.split()
+    if not words:
+        return []
+
     chunks = []
-    step = CHUNK_SIZE - CHUNK_OVERLAP
-    for i in range(0, len(words), step):
-        chunk = " ".join(words[i:i + CHUNK_SIZE])
+    start = 0
+
+    while start < len(words):
+        end = min(start + CHUNK_SIZE, len(words))
+
+        # If not at the end of text, try to snap to a sentence boundary
+        if end < len(words):
+            search_floor = max(start + CHUNK_SIZE // 2, start + 20)
+            for i in range(end - 1, search_floor - 1, -1):
+                w = words[i]
+                # Sentence-ending: word ends with . ! ? or ." ?" !"
+                if w[-1] in '.!?' or (len(w) >= 2 and w[-1] == '"' and w[-2] in '.!?'):
+                    end = i + 1
+                    break
+
+        chunk = " ".join(words[start:end])
         if len(chunk.split()) > 20:
             chunks.append(chunk)
+
+        # Done once we've reached the end of text
+        if end >= len(words):
+            break
+        # Next chunk starts CHUNK_OVERLAP words before where this one ended
+        start = end - CHUNK_OVERLAP
+
     return chunks
 
+# Namespace UUID for deterministic chunk IDs (uuid5)
+_CHUNK_NS = uuid.UUID("c4a1e2b0-7d3f-4e5a-9b1c-2d8f6a0e3c7b")
+
 def deterministic_id(source: str, chunk_index: int) -> str:
-    """Stable UUID from source + index so re-indexing overwrites, not duplicates."""
-    digest = hashlib.md5(f"{source}:{chunk_index}".encode()).hexdigest()
-    return str(uuid.UUID(digest))
+    """Stable UUID5 from source + index so re-indexing overwrites, not duplicates."""
+    return str(uuid.uuid5(_CHUNK_NS, f"{source}:{chunk_index}"))
 
 # --- Retrieval ---
 def retrieve(query: str, collection: str, top_k: int = 5) -> list[dict]:

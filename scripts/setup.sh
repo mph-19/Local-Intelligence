@@ -3,7 +3,7 @@
 # Detects distro and installs packages accordingly.
 # Usage: bash scripts/setup.sh
 
-set -e
+set -euo pipefail
 
 KNOWLEDGE_DIR="${KNOWLEDGE_DIR:-/knowledge}"
 
@@ -55,13 +55,19 @@ case $PKG_MGR in
         # Tailscale has its own install script for Debian/Ubuntu
         if ! command -v tailscale &>/dev/null; then
             echo "  Installing Tailscale..."
-            curl -fsSL https://tailscale.com/install.sh | sh
+            ts_script="$(mktemp /tmp/tailscale-install-XXXXXX.sh)"
+            curl -fsSL -o "$ts_script" https://tailscale.com/install.sh
+            sh "$ts_script"
+            rm -f "$ts_script"
         fi
         ;;
     dnf)
         $INSTALL kiwix-tools cmake python3 python3-pip docker
         if ! command -v tailscale &>/dev/null; then
-            curl -fsSL https://tailscale.com/install.sh | sh
+            ts_script="$(mktemp /tmp/tailscale-install-XXXXXX.sh)"
+            curl -fsSL -o "$ts_script" https://tailscale.com/install.sh
+            sh "$ts_script"
+            rm -f "$ts_script"
         fi
         ;;
 esac

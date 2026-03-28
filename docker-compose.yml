@@ -14,7 +14,10 @@
 #   make ingest-docs                # index your documents
 #   make down                       # stop everything
 #
-# First run builds images (~15-30 min). Subsequent starts are instant.
+# First run builds images (~5-15 min). Subsequent starts are instant.
+#
+# Network: ports bind to 127.0.0.1 (localhost only) by default.
+# To expose on the LAN: set BIND_ADDR=0.0.0.0 in .env
 #
 # Requirements:
 #   - Copy .env.example to .env and run: make setup (or edit manually)
@@ -31,11 +34,14 @@ services:
       context: .
       dockerfile: docker/Dockerfile.falcon3
     ports:
-      - "${LLM_PORT:-8080}:8080"
+      - "${BIND_ADDR:-127.0.0.1}:${LLM_PORT:-8080}:8080"
     environment:
       - CTX_SIZE=${FALCON_CTX_SIZE:-32768}
       - THREADS=${THREADS:-0}
     profiles: ["cpu", "dual"]
+    read_only: true
+    tmpfs:
+      - /tmp
     deploy:
       resources:
         limits:
@@ -55,12 +61,16 @@ services:
       dockerfile: docker/Dockerfile.falcon3
       args:
         MODEL_REPO: tiiuae/Falcon3-3B-Instruct-1.58bit
+        GGUF_REPO: tiiuae/Falcon3-3B-Instruct-1.58bit-GGUF
     ports:
-      - "${LLM_PORT:-8080}:8080"
+      - "${BIND_ADDR:-127.0.0.1}:${LLM_PORT:-8080}:8080"
     environment:
       - CTX_SIZE=${FALCON_CTX_SIZE:-8192}
       - THREADS=${THREADS:-0}
     profiles: ["minimal"]
+    read_only: true
+    tmpfs:
+      - /tmp
     deploy:
       resources:
         limits:
@@ -80,11 +90,14 @@ services:
       context: .
       dockerfile: docker/Dockerfile.qwen
     ports:
-      - "${SYNTH_PORT:-8082}:8082"
+      - "${BIND_ADDR:-127.0.0.1}:${SYNTH_PORT:-8082}:8082"
     environment:
       - CTX_SIZE=${QWEN_CTX_SIZE:-8192}
       - GPU_LAYERS=${QWEN_GPU_LAYERS:-99}
     profiles: ["gpu", "dual"]
+    read_only: true
+    tmpfs:
+      - /tmp
     deploy:
       resources:
         reservations:
@@ -108,7 +121,11 @@ services:
       dockerfile: docker/Dockerfile.orchestrator
       target: orchestrator
     ports:
-      - "${ORCHESTRATOR_PORT:-8081}:8081"
+      - "${BIND_ADDR:-127.0.0.1}:${ORCHESTRATOR_PORT:-8081}:8081"
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     volumes:
       - ${KNOWLEDGE_DIR:-./data/knowledge}:/knowledge
     environment:
@@ -120,6 +137,20 @@ services:
       - ORCHESTRATOR_PORT=8081
       - QDRANT_PATH=/knowledge/vectors/qdrant
       - RAG_TOP_K=${RAG_TOP_K:-5}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
+    depends_on:
+      falcon3:
+        condition: service_healthy
+        required: false
+      falcon3-mini:
+        condition: service_healthy
+        required: false
+      qwen:
+        condition: service_healthy
+        required: false
+      kiwix:
+        condition: service_started
+        required: false
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081/v1/models || exit 1"]
@@ -130,9 +161,13 @@ services:
 
   # ── Kiwix — offline knowledge bases ─────────────────────────────
   kiwix:
-    image: ghcr.io/kiwix/kiwix-serve:3.8.2
+    image: ghcr.io/kiwix/kiwix-serve:3.8.2@sha256:acdab28186a66b51bfd4202210c6732931ea95cf41c711148a0c9770b9fcc9e1
     ports:
-      - "${KIWIX_PORT:-8888}:8888"
+      - "${BIND_ADDR:-127.0.0.1}:${KIWIX_PORT:-8888}:8888"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
     volumes:
       - ${KNOWLEDGE_DIR:-./data/knowledge}:/knowledge
     entrypoint: ["/bin/sh", "-c"]
@@ -153,16 +188,27 @@ services:
           sleep infinity
         fi
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8888/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s    # time for kiwix-manage to build library XML
 
   # ── Open WebUI — chat interface ─────────────────────────────────
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.8.9
+    image: ghcr.io/open-webui/open-webui:v0.8.9@sha256:4320d38874dd6f43fc865209b1d5b1fae903055a7fa56de8c2493bf836f7920a
     ports:
-      - "${WEBUI_PORT:-3000}:8080"
+      - "${BIND_ADDR:-127.0.0.1}:${WEBUI_PORT:-3000}:8080"
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     environment:
       - OPENAI_API_BASE_URL=http://orchestrator:8081/v1
       - OPENAI_API_KEY=local
       - WEBUI_AUTH=true
+      - ENABLE_SIGNUP=${ENABLE_SIGNUP:-false}
     volumes:
       - webui-data:/app/backend/data
     depends_on:
@@ -176,13 +222,19 @@ services:
       context: .
       dockerfile: docker/Dockerfile.orchestrator
       target: ingest
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     volumes:
       - ${KNOWLEDGE_DIR:-./data/knowledge}:/knowledge
     environment:
       - QDRANT_PATH=/knowledge/vectors/qdrant
       - KIWIX_URL=http://kiwix:8888
     depends_on:
-      - kiwix
+      kiwix:
+        condition: service_healthy
+        required: false
     profiles:
       - tools
 

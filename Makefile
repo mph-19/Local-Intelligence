@@ -8,7 +8,7 @@ COMPOSE := docker compose
 # ── Core ─────────────────────────────────────────────────────────────
 
 .PHONY: up
-up: init ## Start all services (uses profile from .env)
+up: init check-ports ## Start all services (uses profile from .env)
 	$(COMPOSE) up -d
 
 .PHONY: down
@@ -20,10 +20,29 @@ restart: ## Restart all services
 	$(COMPOSE) restart
 
 .PHONY: build
-build: ## Build/rebuild all images (sequentially to avoid OOM)
-	$(COMPOSE) build falcon3
-	$(COMPOSE) build qwen
-	$(COMPOSE) build orchestrator
+build: ## Build images for the active profile (sequentially to avoid OOM)
+	@. ./.env 2>/dev/null; \
+	profile="$${COMPOSE_PROFILES:-cpu}"; \
+	echo "Building for profile: $$profile"; \
+	case "$$profile" in \
+		cpu) \
+			echo "  -> falcon3 (10B)"; $(COMPOSE) build falcon3; \
+			;; \
+		minimal) \
+			echo "  -> falcon3-mini (3B)"; $(COMPOSE) build falcon3-mini; \
+			;; \
+		gpu) \
+			echo "  -> qwen"; $(COMPOSE) build qwen; \
+			;; \
+		dual) \
+			echo "  -> falcon3 (10B)"; $(COMPOSE) build falcon3; \
+			echo "  -> qwen"; $(COMPOSE) build qwen; \
+			;; \
+		*) \
+			echo "Unknown profile: $$profile"; exit 1; \
+			;; \
+	esac; \
+	echo "  -> orchestrator"; $(COMPOSE) build orchestrator
 
 .PHONY: pull
 pull: ## Pull latest pre-built images (kiwix, open-webui)
@@ -70,6 +89,37 @@ ingest-kiwix: ## Index Kiwix articles (usage: make ingest-kiwix QUERY="python" B
 
 # ── Monitoring ───────────────────────────────────────────────────────
 
+.PHONY: check-ports
+check-ports: ## Verify configured ports are free on the host
+	@. ./.env 2>/dev/null; \
+	_free() { \
+		if command -v ss >/dev/null 2>&1; then \
+			! ss -tlnH "sport = :$$1" 2>/dev/null | grep -q . ; \
+		elif command -v lsof >/dev/null 2>&1; then \
+			! lsof -iTCP:$$1 -sTCP:LISTEN >/dev/null 2>&1; \
+		else return 0; fi; \
+	}; \
+	_chk() { \
+		if _free "$$1"; then \
+			echo "  [free]  $$2 = $$1"; \
+		else \
+			echo "  [BUSY]  $$2 = $$1  <- run 'make setup' to reassign"; \
+			BUSY=1; \
+		fi; \
+	}; \
+	BUSY=0; \
+	echo "=== Port Check (profile: $${COMPOSE_PROFILES:-cpu}) ==="; \
+	case "$${COMPOSE_PROFILES:-cpu}" in \
+		cpu|dual|minimal) _chk "$${LLM_PORT:-8080}"          LLM_PORT ;; \
+	esac; \
+	case "$${COMPOSE_PROFILES:-cpu}" in \
+		gpu|dual)         _chk "$${SYNTH_PORT:-8082}"         SYNTH_PORT ;; \
+	esac; \
+	_chk "$${ORCHESTRATOR_PORT:-8081}" ORCHESTRATOR_PORT; \
+	_chk "$${KIWIX_PORT:-8888}"        KIWIX_PORT; \
+	_chk "$${WEBUI_PORT:-3000}"        WEBUI_PORT; \
+	if [ "$$BUSY" != 0 ]; then echo "Tip: run 'make setup' to auto-assign free ports."; fi
+
 .PHONY: health
 health: ## Check if all services are responding
 	@. ./.env 2>/dev/null; \
@@ -100,9 +150,10 @@ health: ## Check if all services are responding
 
 .PHONY: chat
 chat: ## Quick test chat (usage: make chat Q="What is Linux?")
-	@curl -s http://localhost:$${ORCHESTRATOR_PORT:-8081}/v1/chat/completions \
-		-H "Content-Type: application/json" \
-		-d "{\"model\":\"local-intelligence\",\"messages\":[{\"role\":\"user\",\"content\":\"$${Q:-Hello, what can you help me with?}\"}],\"max_tokens\":200}" \
+	@jq -n --arg q "$${Q:-Hello, what can you help me with?}" \
+		'{"model":"local-intelligence","messages":[{"role":"user","content":$$q}],"max_tokens":200}' \
+		| curl -s http://localhost:$${ORCHESTRATOR_PORT:-8081}/v1/chat/completions \
+			-H "Content-Type: application/json" -d @- \
 		| python3 -m json.tool 2>/dev/null \
 		|| echo "Orchestrator not responding. Run: make up"
 
@@ -112,13 +163,46 @@ chat: ## Quick test chat (usage: make chat Q="What is Linux?")
 check-updates: ## Check all pinned dependencies for available updates
 	@bash scripts/check-updates.sh
 
+.PHONY: wait-healthy
+wait-healthy: ## Poll services until all respond (timeout: WAIT_TIMEOUT, default 120s)
+	@. ./.env 2>/dev/null; \
+	timeout=$${WAIT_TIMEOUT:-120}; elapsed=0; interval=5; \
+	_up() { curl -sf "$$1" >/dev/null 2>&1; }; \
+	_all() { \
+		case "$${COMPOSE_PROFILES:-cpu}" in \
+			cpu|dual|minimal) _up "http://localhost:$${LLM_PORT:-8080}/v1/models" || return 1;; \
+		esac; \
+		case "$${COMPOSE_PROFILES:-cpu}" in \
+			gpu|dual) _up "http://localhost:$${SYNTH_PORT:-8082}/v1/models" || return 1;; \
+		esac; \
+		_up "http://localhost:$${ORCHESTRATOR_PORT:-8081}/v1/models" || return 1; \
+		_up "http://localhost:$${KIWIX_PORT:-8888}/" || return 1; \
+		_up "http://localhost:$${WEBUI_PORT:-3000}/" || return 1; \
+	}; \
+	_show() { if _up "$$1"; then echo "  [OK]   $$2"; else echo "  [FAIL] $$2"; fi; }; \
+	echo "Waiting for services (timeout: $${timeout}s)..."; \
+	while [ $$elapsed -lt $$timeout ]; do \
+		if _all; then echo "All services healthy ($${elapsed}s)"; exit 0; fi; \
+		sleep $$interval; elapsed=$$((elapsed + interval)); \
+		echo "  $${elapsed}s / $${timeout}s ..."; \
+	done; \
+	echo "Timeout after $${timeout}s — status:"; \
+	case "$${COMPOSE_PROFILES:-cpu}" in \
+		cpu|dual|minimal) _show "http://localhost:$${LLM_PORT:-8080}/v1/models" "Falcon3  :$${LLM_PORT:-8080}";; \
+	esac; \
+	case "$${COMPOSE_PROFILES:-cpu}" in \
+		gpu|dual) _show "http://localhost:$${SYNTH_PORT:-8082}/v1/models" "Qwen     :$${SYNTH_PORT:-8082}";; \
+	esac; \
+	_show "http://localhost:$${ORCHESTRATOR_PORT:-8081}/v1/models" "Orchestr :$${ORCHESTRATOR_PORT:-8081}"; \
+	_show "http://localhost:$${KIWIX_PORT:-8888}/" "Kiwix    :$${KIWIX_PORT:-8888}"; \
+	_show "http://localhost:$${WEBUI_PORT:-3000}/" "WebUI    :$${WEBUI_PORT:-3000}"; \
+	exit 1
+
 .PHONY: test
 test: ## Build and run a quick smoke test (health checks all services)
 	$(COMPOSE) build
 	$(COMPOSE) up -d
-	@echo "Waiting for services to start..."
-	@sleep 10
-	@$(MAKE) health
+	@$(MAKE) wait-healthy
 	@echo ""
 	@echo "Smoke test: sending test query..."
 	@$(MAKE) chat Q="What is 2+2?" || true

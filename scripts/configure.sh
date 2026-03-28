@@ -66,13 +66,23 @@ detect_hardware() {
     if grep -q avx512 /proc/cpuinfo 2>/dev/null; then HAS_AVX512=true; fi
 
     # NVIDIA GPU
+    # Use -i 0 to query the physical GPU directly — without it, MIG-enabled
+    # GPUs may return MIG instance info instead, giving wrong VRAM values.
+    # Falls back to plain --query-gpu, then nvidia-smi -L parsing.
     HAS_NVIDIA=false
     NVIDIA_GPU=""
     VRAM_MB=0
     if command -v nvidia-smi &>/dev/null; then
         HAS_NVIDIA=true
-        NVIDIA_GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-        VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo 0)
+        NVIDIA_GPU=$(nvidia-smi -i 0 --query-gpu=name --format=csv,noheader 2>/dev/null \
+            || nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 \
+            || echo "unknown")
+        VRAM_MB=$(nvidia-smi -i 0 --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+            || nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 \
+            || echo 0)
+        # Sanitize: strip whitespace, ensure numeric
+        VRAM_MB=$(echo "$VRAM_MB" | tr -dc '0-9')
+        [ -z "$VRAM_MB" ] && VRAM_MB=0
     fi
 
     # Docker + NVIDIA container toolkit
@@ -85,6 +95,91 @@ detect_hardware() {
         elif [ -f /etc/docker/daemon.json ] && grep -q nvidia /etc/docker/daemon.json 2>/dev/null; then
             HAS_NVIDIA_DOCKER=true
         fi
+    fi
+}
+
+# ── Port availability ────────────────────────────────────────────
+is_port_free() {
+    local port="$1"
+    if command -v ss &>/dev/null; then
+        ! ss -tlnH "sport = :$port" 2>/dev/null | grep -q .
+    elif command -v lsof &>/dev/null; then
+        ! lsof -iTCP:"$port" -sTCP:LISTEN &>/dev/null
+    elif command -v netstat &>/dev/null; then
+        ! netstat -tln 2>/dev/null | grep -q ":$port "
+    else
+        return 0  # can't check — assume free
+    fi
+}
+
+find_free_port() {
+    local port="$1"
+    local tries=0
+    while [ $tries -lt 100 ]; do
+        if is_port_free "$port"; then
+            echo "$port"
+            return 0
+        fi
+        port=$((port + 1))
+        tries=$((tries + 1))
+    done
+    echo "$1"  # exhausted — return original
+    return 1
+}
+
+check_and_fix_ports() {
+    local profile="$1"
+    local changed=false
+    local new_port
+
+    echo -e "${CYAN}Checking port availability:${NC}"
+
+    # Status goes to stderr; only the (possibly updated) port to stdout.
+    _check() {
+        local name="$1" port="$2"
+        if is_port_free "$port"; then
+            echo -e "  ${GREEN}[free]${NC}  ${name}=${port}" >&2
+            echo "$port"
+        else
+            local free
+            free=$(find_free_port "$((port + 1))")
+            echo -e "  ${YELLOW}[busy]${NC}  ${name}=${port} → reassigned to ${free}" >&2
+            echo "$free"
+        fi
+    }
+
+    # Profile-specific LLM ports
+    case "$profile" in
+        cpu|dual|minimal)
+            new_port=$(_check LLM_PORT "$llm_port")
+            [ "$new_port" != "$llm_port" ] && changed=true
+            llm_port="$new_port" ;;
+    esac
+    case "$profile" in
+        gpu|dual)
+            new_port=$(_check SYNTH_PORT "$synth_port")
+            [ "$new_port" != "$synth_port" ] && changed=true
+            synth_port="$new_port" ;;
+    esac
+
+    # Always-active services
+    new_port=$(_check ORCHESTRATOR_PORT "$orch_port")
+    [ "$new_port" != "$orch_port" ] && changed=true
+    orch_port="$new_port"
+
+    new_port=$(_check KIWIX_PORT "$kiwix_port")
+    [ "$new_port" != "$kiwix_port" ] && changed=true
+    kiwix_port="$new_port"
+
+    new_port=$(_check WEBUI_PORT "$webui_port")
+    [ "$new_port" != "$webui_port" ] && changed=true
+    webui_port="$new_port"
+
+    echo ""
+    if $changed; then
+        echo -e "${YELLOW}Some ports were busy and have been reassigned.${NC}"
+        echo -e "${DIM}You can change them later in .env${NC}"
+        echo ""
     fi
 }
 
@@ -187,10 +282,12 @@ write_env() {
         [ -n "$existing" ] && knowledge_dir="$existing"
     fi
 
-    # Preserve existing ports
+    # Preserve existing bind address and ports
+    local bind_addr="127.0.0.1"
     local llm_port=8080 synth_port=8082 orch_port=8081 kiwix_port=8888 webui_port=3000
     if [ -f "$ENV_FILE" ]; then
         local v
+        v=$(grep '^BIND_ADDR=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true); [ -n "$v" ] && bind_addr="$v"
         v=$(grep '^LLM_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true); [ -n "$v" ] && llm_port="$v"
         v=$(grep '^SYNTH_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true); [ -n "$v" ] && synth_port="$v"
         v=$(grep '^ORCHESTRATOR_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true); [ -n "$v" ] && orch_port="$v"
@@ -245,6 +342,9 @@ write_env() {
             ;;
     esac
 
+    # Check host ports and auto-reassign any that are occupied
+    check_and_fix_ports "$profile"
+
     cat > "$ENV_FILE" <<EOF
 # Local Intelligence — generated by configure.sh
 # Profile: ${profile} | Pipeline: ${pipeline_mode}
@@ -270,6 +370,11 @@ QWEN_GPU_LAYERS=99
 LLM_URL=${llm_url}
 TRIAGE_LLM_URL=${triage_url}
 SYNTH_LLM_URL=${synth_url}
+
+# ── Network binding ─────────────────────────────────────────────────
+# 127.0.0.1 = localhost only (secure default)
+# 0.0.0.0   = all interfaces (needed for LAN/multi-host access)
+BIND_ADDR=${bind_addr}
 
 # ── Ports ───────────────────────────────────────────────────────────
 LLM_PORT=${llm_port}

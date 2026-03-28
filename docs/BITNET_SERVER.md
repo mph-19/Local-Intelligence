@@ -29,8 +29,20 @@ The KV cache for context scales at ~160 KB/token — 32K context uses ~5 GB RAM.
 ### 1. Clone and build bitnet.cpp with Falcon3 10B
 
 bitnet.cpp (Microsoft's BitNet framework) officially supports Falcon3 1.58-bit
-models. The `setup_env.py` script downloads the model and compiles optimized
-ternary kernels in one step.
+models. The `setup_env.py` script generates optimized ternary lookup-table
+kernels for your CPU architecture and compiles the `llama-server` binary.
+
+#### Docker (recommended)
+
+The Dockerfile handles everything automatically. It patches `setup_env.py` to
+skip the slow model conversion (~30+ min) and instead downloads a pre-built
+GGUF from HuggingFace in a parallel build stage:
+
+```bash
+make build    # ~5-10 min (compile + parallel GGUF download)
+```
+
+#### Bare metal
 
 ```bash
 cd /knowledge/services
@@ -38,13 +50,25 @@ git clone https://github.com/microsoft/BitNet.git bitnet-cpp
 cd bitnet-cpp
 pip install -r requirements.txt
 
-# Build with Falcon3 10B — downloads model + compiles optimized CPU kernels
+# Option A: Full setup (builds binary + downloads & converts model, ~30+ min)
 python setup_env.py --hf-repo tiiuae/Falcon3-10B-Instruct-1.58bit -q i2_s
+
+# Option B: Build binary only, then download pre-built GGUF (faster, ~10 min)
+#   Step 1: Build with kernel codegen (patch out the slow model conversion)
+sed -i 's/^    prepare_model()/    pass  # skipped/' setup_env.py
+python setup_env.py --hf-repo tiiuae/Falcon3-10B-Instruct-1.58bit -q i2_s
+#   Step 2: Download pre-built GGUF (~2 GB)
+pip install huggingface-hub
+huggingface-cli download tiiuae/Falcon3-10B-Instruct-1.58bit-GGUF \
+    ggml-model-i2_s.gguf --local-dir models/Falcon3-10B-Instruct-1.58bit
 ```
 
-This produces the GGUF model at `models/Falcon3-10B-Instruct-1.58bit/ggml-model-i2_s.gguf`
-and compiles the inference binary with optimized ternary kernels matched to your
-CPU's instruction set (AVX2, AVX-512, or ARM NEON — auto-detected).
+Both options produce the same result: a `llama-server` binary with optimized
+ternary kernels matched to your CPU (AVX2, AVX-512, or ARM NEON — auto-detected)
+and a GGUF model at `models/Falcon3-10B-Instruct-1.58bit/ggml-model-i2_s.gguf`.
+
+The pre-built GGUFs are published by TII (the Falcon team) at
+`tiiuae/Falcon3-{10B,3B,1B}-Instruct-1.58bit-GGUF` on HuggingFace.
 
 ### 2. Verify inference works
 

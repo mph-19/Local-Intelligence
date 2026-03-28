@@ -88,12 +88,33 @@ local-intelligence/
 - **Profile-based deployment**: `cpu`, `gpu`, `dual`, `minimal` profiles control
   which LLM services start. Set via `COMPOSE_PROFILES` in `.env`.
 - **Falcon3 10B** (1.58-bit quantized, ~2 GB RAM) for CPU inference via bitnet.cpp
+- **Pre-built GGUF download**: The Falcon3 Dockerfile downloads a pre-converted
+  GGUF from `tiiuae/Falcon3-10B-Instruct-1.58bit-GGUF` instead of running the
+  slow `prepare_model()` conversion (~30+ min). `setup_env.py` is patched to
+  skip `prepare_model()` while preserving kernel codegen and compilation.
 - **Qwen 3.5 9B** (Q4_K_M GGUF, ~5.5 GB VRAM) for GPU inference via llama.cpp
 - **Dual-model pipeline**: Falcon3 triages (fast, CPU), Qwen synthesizes (quality, GPU)
   — controlled by `PIPELINE_MODE=dual` in `.env`
 - **32K context window** on Falcon3 with automatic context shifting
 - **8K context window** on Qwen (configurable, limited by 10 GB VRAM)
 - Designed for portability — runs on any machine with AVX2/NEON and 4+ GB RAM
+- **Weighted query classification**: `classify_query()` uses three-tier weighted
+  keyword scoring (ambiguous 0.5, strong 1.0, phrases 2.0, disambiguation
+  compounds 3.0) with a confidence threshold of 2.0. Returns a list of collection
+  names; ambiguous queries merge collections for broad retrieval.
+- **Lazy-loaded RAG module**: `rag.py` defers SentenceTransformer (~270 MB) and
+  QdrantClient initialization to first use via `_LazyProxy`. Import is free;
+  scripts that only need `chunk_text()` or `deterministic_id()` never load models.
+- **Sentence-aware chunking**: `chunk_text()` scans backward from chunk boundaries
+  for sentence-ending punctuation, snapping to sentence breaks when possible.
+  Falls back to word-count splitting for code/lists. Same CHUNK_SIZE/OVERLAP.
+- **UUID5 chunk IDs**: `deterministic_id()` uses `uuid.uuid5()` with a project-
+  specific namespace UUID. RFC 4122-compliant, SHA-1 based. No collision risk.
+- **Prompt injection defense**: Retrieved context is wrapped in `<context>` delimiter
+  tags with explicit data-only instructions before and after the block.
+- **Structured observability**: Every decision point in `chat()` logs with `[tag]`
+  prefixes — classification scores, RAG timing, chunk scores, triage filtering,
+  LLM timing, and end-to-end summary. Viewable via `docker compose logs`.
 - **Tiered retrieval**: Qdrant vectors for curated content, Kiwix fulltext fallback
 - **Model served via persistent process**, not subprocess-per-request
 - **Nomic embeddings require prefixes**: `search_document:` for indexing,
@@ -104,8 +125,90 @@ local-intelligence/
 - **Tailscale** for secure remote access without port forwarding
 - **Services are host-agnostic** — each component addresses others by
   configurable URL, so they can run on the same machine or across the network
+- **Service startup ordering**: Orchestrator uses `depends_on` with
+  `required: false` on all LLM services and Kiwix. Only services active in
+  the current profile are waited on; inactive services are skipped. Requires
+  Docker Compose v2.20+.
+- **LLM error handling**: `call_llm()` uses tuple timeouts `(connect, read)`
+  to fail fast on unreachable services (5s connect) while tolerating slow
+  inference (90s read). Retries once on connection errors and 5xx responses.
+  Errors return HTTP 502 with an OpenAI-compatible error body.
+- **Container memory limits**: Every service has a `deploy.resources.limits.memory`
+  cap — falcon3 12g, falcon3-mini 4g, orchestrator 2g, open-webui 1g,
+  kiwix 512m, ingest 2g. Prevents a leak from OOM-killing unrelated services.
+- **Non-root containers**: All custom Dockerfiles run as non-root. The
+  orchestrator and ingest use `appuser` (UID 1000), Falcon3 and Qwen use
+  `llmuser` (UID 1000). Binaries and model files are root-owned and read-only
+  to the runtime user. Files on bind-mounted volumes are owned by UID 1000
+  (matching the typical host user), avoiding permission conflicts.
+- **Localhost-only port binding**: All Docker port mappings use
+  `${BIND_ADDR:-127.0.0.1}` so services are only reachable from the host by
+  default. Set `BIND_ADDR=0.0.0.0` in `.env` for LAN/multi-host access.
+- **Embedding model revision pinning**: The nomic-embed-text-v1.5 model
+  requires `trust_remote_code=True` (custom attention implementation). The
+  revision is pinned to an audited commit hash in both `rag.py` and
+  `Dockerfile.orchestrator` so a compromised HuggingFace repo cannot inject
+  code. Update the hash deliberately after auditing new versions.
+- **Streaming ingestion**: `ingest_docs.py` reads files larger than 1 MB in
+  slices with word-level overlap, so arbitrarily large documents are fully
+  indexed without spiking container memory.
+- **Kiwix ingestion limits**: `ingest_kiwix.py` caps pagination at 500 pages
+  (12,500 results) and stops after 5,000 new articles per run. Both clamped
+  at the function boundary to prevent runaway requests.
+- **Image digest pinning**: Pre-built Docker images (Open WebUI, Kiwix) are
+  pinned with `tag@sha256:digest` for immutable builds. Tags retained for
+  readability.
+- **Profile-aware builds**: `make build` reads `COMPOSE_PROFILES` from `.env`
+  and only builds services needed for the active profile. Saves 5-10 min and
+  ~3 GB disk when GPU/minimal services aren't used.
+- **Port availability checking**: `make setup` auto-detects busy ports and
+  reassigns to the next free one. `make check-ports` verifies before startup.
+- **Health polling**: `make wait-healthy` replaces fixed `sleep` with polling —
+  succeeds immediately when all services respond, times out with per-service
+  status after `WAIT_TIMEOUT` (default 120s).
+- **Dynamic model paths**: `install.sh` derives all model paths from `MODEL_REPO`
+  and `MODEL_QUANT` variables. The systemd unit, download instructions, and
+  verification all adapt to whichever model was installed (10B, 3B, etc.).
+- **Disk space pre-check**: `install.sh` verifies available space before the
+  bitnet.cpp build (4 GB with model, 2 GB without `--no-model`).
+- **MIG-compatible NVIDIA detection**: `configure.sh` queries GPU by index
+  (`nvidia-smi -i 0`) which works in both MIG and non-MIG modes.
+- **Request size limits**: `ChatRequest` uses Pydantic `Field()` constraints —
+  `max_tokens` capped at 4096, `messages` limited to 50, individual message
+  content limited to 32,000 characters, `temperature` bounded to 0.0–2.0.
+  FastAPI returns HTTP 422 automatically for violations.
+- **Safe JSON in Makefile**: `make chat` uses `jq --arg` to construct the JSON
+  payload, preventing both shell injection and JSON injection from the `Q`
+  variable. The payload is piped to `curl -d @-` via stdin.
+- **CORS middleware**: The orchestrator restricts cross-origin requests via
+  `CORSMiddleware`. Allowed origins default to `http://localhost:3000`
+  (Open WebUI) and are configurable via `CORS_ORIGINS` env var for
+  multi-host deployments.
+- **Download-then-execute**: Install scripts (`install.sh`, `setup.sh`) download
+  remote scripts to a tempfile before executing, instead of piping directly to
+  shell. Prevents execution of truncated downloads on network failure.
+- **Qwen model path via ENV**: The Qwen Dockerfile propagates the model filename
+  from build arg to runtime via `ARG MODEL_FILE` → `ENV MODEL_PATH`, eliminating
+  the `$(cat /model_path.txt)` command substitution in the ENTRYPOINT.
+- **Signup disabled by default**: Open WebUI's `ENABLE_SIGNUP` defaults to `false`
+  in docker-compose.yml. The first user to register becomes admin; no further
+  signups are allowed unless `ENABLE_SIGNUP=true` is set in `.env`.
+- **Strict shell mode**: Both `install.sh` and `setup.sh` use `set -euo pipefail`
+  — exits on error, treats unset variables as errors, and catches pipe failures.
+- **Security headers**: The orchestrator sets `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Cache-Control: no-store`, and a strict
+  `Content-Security-Policy` on all responses via `SecurityHeadersMiddleware`.
+- **Exact dependency pinning**: `requirements.orchestrator.txt` uses `==` pins
+  (not `~=`) for all 11 dependencies. Builds are deterministic — update versions
+  deliberately by editing the file and rebuilding.
+- **Read-only LLM containers**: All three LLM services (falcon3, falcon3-mini,
+  qwen) run with `read_only: true` and `tmpfs: /tmp`. The container filesystem
+  is immutable at runtime; `/tmp` provides ephemeral scratch space in RAM only.
 
 ## Port Map
+
+All ports bind to `127.0.0.1` (localhost) by default. Set `BIND_ADDR=0.0.0.0`
+in `.env` for LAN/multi-host access.
 
 | Service | Port | Active in profiles |
 |---|---|---|
@@ -119,8 +222,9 @@ local-intelligence/
 ## Deployment Options
 
 1. **Docker** (recommended): `make setup && make build && make up` — detects
-   hardware, picks profile, builds images, starts everything. Works on any OS
-   with Docker. GPU profiles require nvidia-container-toolkit.
+   hardware, picks profile, builds images, starts everything. Requires Docker
+   Compose v2.20+ (for `depends_on: required: false`). GPU profiles require
+   nvidia-container-toolkit.
 2. **Bare metal**: `bash scripts/install.sh` — supports Linux (x86_64, ARM64) and
    macOS (Intel, Apple Silicon). Creates a Python venv, builds bitnet.cpp, installs
    systemd services.
@@ -130,15 +234,28 @@ local-intelligence/
 - **Qdrant embedded mode file locking**: The orchestrator and ingest containers
   cannot write to the same Qdrant path simultaneously. Run ingestion while the
   orchestrator is stopped, or accept read-only access during ingestion.
-- **Blocking HTTP in async handler**: `orchestrator.py` uses synchronous `requests`
-  inside async FastAPI handlers. Works fine for single-user, but would need
-  `httpx.AsyncClient` for concurrent users.
+- **Async HTTP via httpx**: `orchestrator.py` uses `httpx.AsyncClient` for all
+  LLM calls, so concurrent requests don't block the FastAPI event loop. A shared
+  client instance is reused across requests for connection pooling.
 - **Clang 18+ build requirement**: bitnet.cpp requires clang 18+, which isn't in
   default repos on Ubuntu < 24.04 or Debian stable. The installer handles this
   via the LLVM APT repository.
 - **Triage parsing**: The dual-model triage step asks Falcon3 to return JSON.
   If the model produces invalid JSON, the orchestrator falls back to sending
-  all chunks to Qwen unfiltered. This is a graceful degradation, not a failure.
+  all chunks to Qwen unfiltered (graceful degradation). If the model returns
+  valid JSON with `"keep": []` (explicitly rejecting all chunks), that decision
+  is respected — the orchestrator returns an "I don't have enough information"
+  response instead of hallucinating.
 - **CUDA architecture pinned to sm_86**: The Qwen Dockerfile targets Ampere GPUs
   (RTX 3000 series). Other generations need `CMAKE_CUDA_ARCHITECTURES` adjusted
   in `docker/Dockerfile.qwen`.
+- **Docker Compose v2.20+ required**: The `depends_on: required: false` syntax
+  used for profile-aware service ordering requires Compose v2.20 or later.
+  Check with `docker compose version`.
+- **BitNet `setup_env.py` patching**: The Dockerfile and installer use `sed` to
+  patch `prepare_model()` out of `setup_env.py`. If Microsoft restructures
+  this function in a future commit, the patch will fail and the build will
+  exit with a clear error. Fix by updating `BITNET_COMMIT` to a tested hash.
+- **`jq` required for `make chat`**: The `make chat` target uses `jq` to safely
+  construct JSON payloads. `jq` is pre-installed on most Linux distros and macOS
+  (via Homebrew). If missing: `apt install jq` / `pacman -S jq` / `brew install jq`.

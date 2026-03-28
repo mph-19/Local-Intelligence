@@ -15,6 +15,8 @@ KIWIX_URL = os.environ.get("KIWIX_URL", "http://localhost:8888")
 SYNC_STATE_FILE = os.environ.get(
     "KIWIX_SYNC_STATE", "/knowledge/vectors/kiwix_sync.json"
 )
+MAX_PAGES = 500          # hard ceiling — 500 pages × 25 = 12,500 search results
+MAX_ARTICLES = 5000      # stop after ingesting this many new articles per run
 
 def fetch_article_text(book: str, path: str) -> str:
     """Fetch an article from kiwix-serve and return plain text."""
@@ -36,13 +38,21 @@ def save_sync_state(state: dict):
     with open(SYNC_STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-def ingest_search_results(book: str, query: str, collection: str, max_pages: int = 100):
+def ingest_search_results(book: str, query: str, collection: str,
+                          max_pages: int = 100, max_articles: int = MAX_ARTICLES):
     """Search kiwix for articles matching a query, then ingest them."""
+    max_pages = min(max(1, max_pages), MAX_PAGES)
+    max_articles = min(max(1, max_articles), MAX_ARTICLES)
+
     ensure_collection(collection)
     state = load_sync_state()
     ingested_count = 0
 
     for page in range(0, max_pages):
+        if ingested_count >= max_articles:
+            print(f"Reached article limit ({max_articles}), stopping.")
+            break
+
         resp = requests.get(f"{KIWIX_URL}/search", params={
             "pattern": query,
             "books": book,
@@ -56,6 +66,9 @@ def ingest_search_results(book: str, query: str, collection: str, max_pages: int
             break
 
         for link in links:
+            if ingested_count >= max_articles:
+                break
+
             href = link.get("href", "")
             article_key = f"{book}:{href}"
 

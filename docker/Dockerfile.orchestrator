@@ -24,16 +24,28 @@ COPY docker/requirements.orchestrator.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
+# Non-root user for runtime security + consistent volume ownership.
+# Created before model download so HF_HOME targets appuser's home.
+RUN groupadd --gid 1000 appuser && \
+    useradd --uid 1000 --gid 1000 --create-home appuser && \
+    mkdir -p /knowledge/vectors/qdrant && \
+    chown -R appuser:appuser /knowledge /app
+
 # Pre-download nomic embedding model into the image (~270 MB)
 # This avoids a slow first-request delay at runtime.
+# Revision is pinned to an audited commit — update deliberately, not automatically.
+ARG EMBED_MODEL=nomic-ai/nomic-embed-text-v1.5
+ARG EMBED_REVISION=e5cf08aadaa33385f5990def41f7a23405aec398
+ENV HF_HOME=/home/appuser/.cache/huggingface
 RUN python3 -c "from sentence_transformers import SentenceTransformer; \
-    SentenceTransformer('nomic-ai/nomic-embed-text-v1.5', trust_remote_code=True)"
+    SentenceTransformer('${EMBED_MODEL}', trust_remote_code=True, revision='${EMBED_REVISION}')" && \
+    chown -R appuser:appuser /home/appuser/.cache
 
 # Copy all service + script code
-COPY services/rag.py /app/rag.py
-COPY services/orchestrator.py /app/orchestrator.py
-COPY scripts/ingest_docs.py /app/ingest_docs.py
-COPY scripts/ingest_kiwix.py /app/ingest_kiwix.py
+COPY --chown=appuser:appuser services/rag.py /app/rag.py
+COPY --chown=appuser:appuser services/orchestrator.py /app/orchestrator.py
+COPY --chown=appuser:appuser scripts/ingest_docs.py /app/ingest_docs.py
+COPY --chown=appuser:appuser scripts/ingest_kiwix.py /app/ingest_kiwix.py
 
 # ── Orchestrator target ──────────────────────────────────────────
 FROM base AS orchestrator
@@ -45,6 +57,7 @@ ENV KIWIX_URL=http://kiwix:8888
 ENV ORCHESTRATOR_PORT=8081
 ENV QDRANT_PATH=/knowledge/vectors/qdrant
 
+USER appuser
 CMD ["python3", "orchestrator.py"]
 
 # ── Ingest target ────────────────────────────────────────────────
@@ -53,4 +66,5 @@ FROM base AS ingest
 ENV QDRANT_PATH=/knowledge/vectors/qdrant
 ENV KIWIX_URL=http://kiwix:8888
 
+USER appuser
 CMD ["python3", "ingest_docs.py", "/knowledge/docs/custom", "custom_docs"]

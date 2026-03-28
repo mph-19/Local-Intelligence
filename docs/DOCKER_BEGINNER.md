@@ -21,6 +21,11 @@ lightweight virtual machine for each service.
   Intelligence uses profiles to select which LLM(s) to run based on your
   hardware. See [Profiles](#profiles) below.
 
+## Requirements
+
+- **Docker Compose v2.20+** — needed for profile-aware service ordering.
+  Docker Desktop ships with a recent Compose. Check with: `docker compose version`
+
 ## Option 1: Docker Desktop (GUI)
 
 Docker Desktop is available for **Windows**, **macOS**, and **Linux**. It gives
@@ -40,10 +45,12 @@ you a graphical interface for managing containers.
 5. **Run the setup wizard and start**:
    ```bash
    make setup    # detects your hardware and picks the right config
-   make build    # builds the Docker images (15-30 min on first run)
+   make build    # builds the Docker images (~5-15 min on first run)
    make up       # starts all services
    ```
 6. **Open the chat interface** at http://localhost:3000
+   **Register immediately** — the first account becomes admin. Signup is
+   disabled by default after the first user registers.
 
 In Docker Desktop you can now see all running containers under the
 **Containers** tab. You can view logs, stop/restart individual services, and
@@ -66,7 +73,7 @@ make setup
 
 # 3. Build the Docker images
 #    Downloads model files and compiles inference engines inside the image.
-#    Only slow the first time (~15-30 min). Rebuilds are cached and fast.
+#    Only slow the first time (~5-15 min). Rebuilds are cached and fast.
 make build
 
 # 4. Start all services in the background
@@ -80,6 +87,7 @@ make health
 # 6. Open the chat interface
 #    Visit http://localhost:3000 in your browser.
 #    First login creates an admin account.
+#    Signup is disabled after the first user registers (by default).
 ```
 
 ## What Each Command Does
@@ -165,9 +173,71 @@ Before running `make up`, make sure:
       profile, install the NVIDIA Container Toolkit:
       https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/
 
+## Local vs Multi-Machine Setup
+
+By default, all services bind to **localhost only** (`127.0.0.1`). This means
+only the machine running Docker can access them — other devices on your network
+cannot. This is the secure default.
+
+### Single machine (default)
+
+Everything runs on one machine. You access Open WebUI at `http://localhost:3000`.
+No network configuration needed — it just works out of the box.
+
+```
+Your machine
+  ├── Falcon3    (localhost:8080)   ← only you can reach these
+  ├── Orchestrator (localhost:8081)
+  ├── Kiwix      (localhost:8888)
+  └── Open WebUI (localhost:3000)   ← open this in your browser
+```
+
+### Accessing from other devices on your network
+
+If you want to reach Open WebUI from your phone, tablet, or another computer
+on the same WiFi/LAN, you need to open the ports to your network. Edit `.env`
+and change one variable:
+
+```bash
+# .env
+BIND_ADDR=0.0.0.0    # listen on all network interfaces
+```
+
+Then restart:
+```bash
+make down && make up
+```
+
+Now other devices can reach the services at your machine's IP address (e.g.
+`http://192.168.1.100:3000`). **Be aware**: this exposes all services to your
+local network. On a trusted home network this is fine. On a shared or public
+network, keep the default `127.0.0.1`.
+
+### Multi-machine deployment
+
+For running services across multiple machines (e.g. LLM on a powerful desktop,
+Kiwix on a NAS), see **[MULTI_HOST.md](MULTI_HOST.md)**. You'll need:
+
+1. `BIND_ADDR=0.0.0.0` on each machine that hosts a service
+2. Environment variables pointing services at each other's IPs/hostnames
+3. Optionally, Caddy as a reverse proxy and Tailscale for secure remote access
+
+### Binding to a specific interface
+
+If you use Tailscale, you can bind only to the Tailscale interface instead of
+all interfaces:
+
+```bash
+# .env — only reachable over Tailscale, not the LAN
+BIND_ADDR=100.x.y.z    # your Tailscale IP
+```
+
+This gives you remote access without exposing services on the local network.
+
 ## Port Map
 
-These are the default ports. All are configurable in `.env`.
+These are the default ports. All are configurable in `.env`. Ports bind to
+`127.0.0.1` (localhost only) unless `BIND_ADDR` is changed.
 
 | Service | Port | When active |
 |---|---|---|
