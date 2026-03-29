@@ -80,9 +80,10 @@ COPY --from=downloader /models/ /models/
 ARG MODEL_FILE=Qwen3.5-9B-Q4_K_M.gguf
 ENV MODEL_PATH=/models/${MODEL_FILE}
 
-# Non-root user — llama-server needs no write access
-RUN groupadd --gid 1000 llmuser && \
-    useradd --uid 1000 --gid 1000 --no-create-home llmuser
+# Non-root user — llama-server needs no write access.
+# GID/UID 1000 may already exist in the NVIDIA base image; skip creation if so.
+RUN if ! getent group 1000 >/dev/null; then groupadd --gid 1000 llmuser; fi && \
+    if ! id -u 1000 >/dev/null 2>&1; then useradd --uid 1000 --gid 1000 --no-create-home llmuser; fi
 
 EXPOSE 8082
 
@@ -90,7 +91,7 @@ ENV CTX_SIZE=8192
 ENV PORT=8082
 ENV GPU_LAYERS=99
 
-USER llmuser
+USER 1000
 ENTRYPOINT ["sh", "-c", \
     "exec llama-server \
         --model \"${MODEL_PATH}\" \
