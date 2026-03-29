@@ -46,7 +46,7 @@ RUN git clone https://github.com/ggerganov/llama.cpp.git . && \
     rm -rf /build/.git /build/build /build/src /build/ggml
 
 # ── Stage 2: Download model ────────────────────────────────────────
-FROM python:3.12-slim AS downloader
+FROM python:3.14-slim AS downloader
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install huggingface-hub~=1.7.0
