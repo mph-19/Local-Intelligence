@@ -8,23 +8,63 @@ from concurrent.futures import ThreadPoolExecutor, Future
 # Add services dir to path so we can import rag module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "services"))
 from rag import (
-    client, ensure_collection, chunk_text,
+    client, ensure_collection, chunk_text, CHUNK_OVERLAP,
     embed_documents_batch, deterministic_id, PointStruct,
 )
 
 EMBED_BATCH_SIZE = 256    # chunks per embedding call (cross-file)
 UPSERT_BATCH_SIZE = 500   # points per Qdrant upsert
+SLICE_SIZE = 1024 * 1024  # 1 MB — read large files in slices to bound memory
 
 
 def read_and_chunk(paths: list[Path], directory: str) -> list[tuple[str, int, str]]:
-    """Read files and chunk them. Returns list of (file_rel_path, chunk_index, chunk_text)."""
+    """Read files and chunk them. Returns list of (file_rel_path, chunk_index, chunk_text).
+
+    Small files are read whole. Files larger than SLICE_SIZE are read in slices
+    with word-level overlap to ensure chunk boundaries stay consistent.
+    """
     items = []
     for path in paths:
-        text = path.read_text(errors="replace")
-        chunks = chunk_text(text)
         rel = str(path.relative_to(directory))
-        for i, chunk in enumerate(chunks):
-            items.append((rel, i, chunk))
+        size = path.stat().st_size
+
+        if size <= SLICE_SIZE:
+            # Small file — read whole (fast path, most files)
+            text = path.read_text(errors="replace")
+            for i, chunk in enumerate(chunk_text(text)):
+                items.append((rel, i, chunk))
+        else:
+            # Large file — stream in slices to bound memory
+            print(f"  [stream] {path.name} ({size / 1024 / 1024:.1f} MB, reading in slices)")
+            chunk_idx = 0
+            overlap_words: list[str] = []
+            with open(path, "r", errors="replace") as f:
+                while True:
+                    raw = f.read(SLICE_SIZE)
+                    if not raw and not overlap_words:
+                        break
+                    # Prepend overlap from previous slice
+                    if overlap_words:
+                        text = " ".join(overlap_words) + " " + raw
+                    else:
+                        text = raw
+                    is_last = len(raw) < SLICE_SIZE
+                    words = text.split()
+
+                    if not is_last:
+                        # Keep last CHUNK_OVERLAP words for next slice
+                        overlap_words = words[-CHUNK_OVERLAP:]
+                        words = words[:-CHUNK_OVERLAP]
+                    else:
+                        overlap_words = []
+
+                    slice_text = " ".join(words)
+                    for chunk in chunk_text(slice_text):
+                        items.append((rel, chunk_idx, chunk))
+                        chunk_idx += 1
+
+                    if is_last:
+                        break
     return items
 
 
@@ -104,7 +144,7 @@ def ingest_directory(directory: str, collection: str):
         print(f"  [{files_done}/{total_files}] {total_chunks} chunks | "
               f"{rate:.1f} files/s | ~{remaining:.0f}s remaining")
 
-    pool.shutdown(wait=False)
+    pool.shutdown(wait=True)
 
     # Flush remaining points
     if upsert_buffer:

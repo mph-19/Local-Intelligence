@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local Intelligence — single-command installer
-# Installs all dependencies, builds bitnet.cpp, downloads the model,
-# sets up the knowledge directory, and configures systemd services.
+# Installs all dependencies, builds bitnet.cpp, downloads the pre-built
+# GGUF model, sets up the knowledge directory, and configures systemd services.
 #
 # Supports: Linux (x86_64, ARM64), macOS (Intel, Apple Silicon)
 # Requires: bash, curl, git (will install the rest)
@@ -56,6 +56,22 @@ info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
+
+check_disk_space() {
+    # Usage: check_disk_space <path> <required_gb> <description>
+    local path="$1" required_gb="$2" desc="$3"
+    local avail_kb avail_gb
+    avail_kb=$(df -Pk "$path" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -z "$avail_kb" ] || [ "$avail_kb" = "0" ]; then
+        warn "Could not check disk space at $path — proceeding anyway"
+        return 0
+    fi
+    avail_gb=$((avail_kb / 1048576))
+    if [ "$avail_gb" -lt "$required_gb" ]; then
+        fail "$desc requires ~${required_gb} GB free, but $path only has ${avail_gb} GB available"
+    fi
+    ok "${avail_gb} GB free at $path (need ${required_gb} GB for $desc)"
+}
 
 confirm() {
     if $AUTO_YES; then return 0; fi
@@ -162,7 +178,10 @@ install_system_deps() {
             CLANG_VER="${CLANG_VER:-0}"
             if [ "$CLANG_VER" -lt 18 ]; then
                 info "Installing clang 18 via LLVM APT repo..."
-                wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 18
+                llvm_script="$(mktemp /tmp/llvm-install-XXXXXX.sh)"
+                wget -qO "$llvm_script" https://apt.llvm.org/llvm.sh
+                sudo bash "$llvm_script" 18
+                rm -f "$llvm_script"
                 sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
                 sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
             fi
@@ -243,6 +262,13 @@ build_bitnet() {
 
     BITNET_DIR="$KNOWLEDGE_DIR/services/bitnet-cpp"
 
+    # Check disk space: ~1 GB for repo + build, ~2 GB for model
+    if $SKIP_MODEL; then
+        check_disk_space "$KNOWLEDGE_DIR" 2 "bitnet.cpp build"
+    else
+        check_disk_space "$KNOWLEDGE_DIR" 4 "bitnet.cpp build + Falcon3 model"
+    fi
+
     if [ -d "$BITNET_DIR" ]; then
         ok "bitnet-cpp already cloned at $BITNET_DIR"
     else
@@ -262,17 +288,45 @@ build_bitnet() {
 
     pip install --quiet -r requirements.txt
 
+    # Apply build patches
+    sed -i 's/sentencepiece = ">=0.1.98,<=0.2.0"/sentencepiece = ">=0.1.98"/' \
+        3rdparty/llama.cpp/gguf-py/pyproject.toml 2>/dev/null || true
+    sed -i 's/int8_t \* y_col = y + col \* by;/const int8_t * y_col = y + col * by;/' \
+        src/ggml-bitnet-mad.cpp 2>/dev/null || true
+
+    # Patch out prepare_model() — uses flexible whitespace match so it works
+    # regardless of upstream indentation (tabs, 2-space, 4-space).
+    sed -i 's/^[[:space:]]*prepare_model().*/    pass  # skipped — using pre-built GGUF/' \
+        setup_env.py
+    if ! grep -q 'skipped — using pre-built GGUF' setup_env.py; then
+        fail "Failed to patch prepare_model() in setup_env.py. Build would take 30+ min."
+    fi
+    ok "Patched setup_env.py (skipping model conversion)"
+
     if $SKIP_MODEL; then
         info "Building without model download (--no-model)"
-        # Just build the binary, don't download the model
-        cmake -B build -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-        cmake --build build --config Release -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
-        ok "bitnet.cpp built (no model)"
-    else
-        info "Building bitnet.cpp and downloading Falcon3 10B (~2 GB)..."
-        info "This may take a while on first run."
         python setup_env.py --hf-repo "$MODEL_REPO" -q "$MODEL_QUANT"
-        ok "bitnet.cpp built + Falcon3 10B downloaded"
+        ok "bitnet.cpp built (no model)"
+        info "Download the pre-built GGUF manually:"
+        info "  pip install huggingface-hub"
+        info "  huggingface-cli download ${MODEL_REPO}-GGUF \\"
+        info "      ggml-model-${MODEL_QUANT}.gguf --local-dir models/$(basename "$MODEL_REPO")"
+    else
+        info "Building bitnet.cpp and downloading $(basename "$MODEL_REPO") GGUF (~2 GB)..."
+        python setup_env.py --hf-repo "$MODEL_REPO" -q "$MODEL_QUANT"
+        ok "bitnet.cpp built with optimized kernels"
+
+        # Download pre-built GGUF (much faster than setup_env.py's conversion)
+        info "Downloading pre-built GGUF from HuggingFace..."
+        MODEL_NAME="$(basename "$MODEL_REPO")"
+        GGUF_REPO="${MODEL_REPO}-GGUF"
+        pip install --quiet huggingface-hub
+        python3 -c "
+from huggingface_hub import hf_hub_download
+hf_hub_download(repo_id='${GGUF_REPO}', filename='ggml-model-${MODEL_QUANT}.gguf',
+    local_dir='models/${MODEL_NAME}')
+"
+        ok "Falcon3 GGUF downloaded to models/${MODEL_NAME}/"
     fi
 
     cd - >/dev/null
@@ -315,7 +369,16 @@ install_systemd_services() {
     fi
 
     BITNET_DIR="$KNOWLEDGE_DIR/services/bitnet-cpp"
-    MODEL_PATH="$BITNET_DIR/models/Falcon3-10B-Instruct-1.58bit/ggml-model-i2_s.gguf"
+    MODEL_NAME="$(basename "$MODEL_REPO")"
+    MODEL_PATH="$BITNET_DIR/models/${MODEL_NAME}/ggml-model-${MODEL_QUANT}.gguf"
+    # Fallback: if derived path doesn't exist, find any GGUF in models/
+    if [ ! -f "$MODEL_PATH" ]; then
+        MODEL_PATH="$(ls "$BITNET_DIR"/models/*/ggml-model-*.gguf 2>/dev/null | head -1 || true)"
+    fi
+    if [ -z "$MODEL_PATH" ] || [ ! -f "$MODEL_PATH" ]; then
+        warn "No GGUF model found — systemd unit will need manual MODEL_PATH"
+        MODEL_PATH="$BITNET_DIR/models/${MODEL_NAME}/ggml-model-${MODEL_QUANT}.gguf"
+    fi
     VENV_PYTHON="$KNOWLEDGE_DIR/venv/bin/python3"
     CURRENT_USER="$(whoami)"
     CPU_THREADS=$(( $(nproc 2>/dev/null || sysctl -n hw.ncpu) - 2 ))
@@ -324,7 +387,7 @@ install_systemd_services() {
     # Falcon3 server
     sudo tee /etc/systemd/system/falcon3-server.service >/dev/null <<UNIT
 [Unit]
-Description=Falcon3 10B LLM Server (CPU)
+Description=Falcon3 LLM Server (CPU) — ${MODEL_NAME}
 After=local-fs.target
 
 [Service]
@@ -448,7 +511,10 @@ verify_install() {
         echo "Quick test — start the server:"
         echo ""
         echo "  $BITNET_DIR/build/bin/llama-server \\"
-        echo "    --model $BITNET_DIR/models/Falcon3-10B-Instruct-1.58bit/ggml-model-i2_s.gguf \\"
+        MODEL_NAME="$(basename "$MODEL_REPO")"
+        GGUF="$(ls "$BITNET_DIR"/models/*/ggml-model-*.gguf 2>/dev/null | head -1 \
+            || echo "$BITNET_DIR/models/${MODEL_NAME}/ggml-model-${MODEL_QUANT}.gguf")"
+        echo "    --model $GGUF \\"
         echo "    --host 127.0.0.1 --port $LLM_PORT \\"
         echo "    --n-gpu-layers 0 --ctx-size 4096 --threads $(nproc 2>/dev/null || echo 4)"
         echo ""

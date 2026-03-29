@@ -56,7 +56,7 @@ One LLM handles everything. The orchestrator runs in `single` pipeline mode.
 
 ```bash
 make setup              # select "cpu" or "minimal" when prompted
-make build              # builds Falcon3 image (~15-30 min first time)
+make build              # builds Falcon3 image (~5-10 min first time)
 make up                 # start all services
 make health             # verify [OK] for all 4 services
 ```
@@ -74,10 +74,13 @@ bash scripts/configure.sh --profile minimal
 bash scripts/install.sh     # builds bitnet.cpp, downloads Falcon3 10B
 ```
 
-For minimal (Falcon3 3B), use the build arg or download the 3B model:
+For minimal (Falcon3 3B), use build args to target the smaller model:
 ```bash
 # Docker:
-docker compose build --build-arg MODEL_REPO=tiiuae/Falcon3-3B-Instruct-1.58bit falcon3
+docker compose build \
+    --build-arg MODEL_REPO=tiiuae/Falcon3-3B-Instruct-1.58bit \
+    --build-arg GGUF_REPO=tiiuae/Falcon3-3B-Instruct-1.58bit-GGUF \
+    falcon3
 
 # Bare metal:
 cd /knowledge/services/bitnet-cpp

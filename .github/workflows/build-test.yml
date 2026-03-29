@@ -14,9 +14,9 @@ jobs:
     name: Build orchestrator image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Build orchestrator
         run: |
           docker buildx build \
@@ -39,9 +39,9 @@ jobs:
     name: Build falcon3 image (compile only)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Test falcon3 compilation
         # Only test that bitnet.cpp compiles — skip model download (too large for CI)
         run: |
@@ -54,8 +54,8 @@ jobs:
     name: Lint Python code
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install and run basic checks

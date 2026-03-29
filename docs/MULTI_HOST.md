@@ -158,6 +158,20 @@ sudo systemctl status caddy
 sudo systemctl reload caddy
 ```
 
+## Network Binding
+
+By default, all Docker ports bind to `127.0.0.1` (localhost only). For
+multi-host deployments, each machine hosting a service must set:
+
+```bash
+# .env on each host
+BIND_ADDR=0.0.0.0
+```
+
+This allows other machines on the network to reach the service. If you use
+Tailscale, you can bind to the Tailscale IP instead (e.g. `BIND_ADDR=100.x.y.z`)
+to avoid exposing services on the local LAN.
+
 ## Service Configuration for Multi-Host
 
 Each service needs to know how to reach the others. Use environment variables
@@ -327,14 +341,17 @@ echo "Done."
 
 ## Full Port Reference
 
-| Service | Port | Host | Binds to | Accessed by |
-|---|---|---|---|---|
-| Caddy | 80/443 | Gateway | 0.0.0.0 | All clients |
-| Open WebUI | 3000 | Any | 0.0.0.0 | Caddy, direct |
-| Orchestrator | 8081 | Desktop | 0.0.0.0 | Open WebUI, Caddy, OpenCode |
-| Falcon3 | 8080 | Inference host (CPU) | 0.0.0.0 | Orchestrator |
-| Kiwix | 8888 | NAS/Desktop | 0.0.0.0 | Caddy (browsing), ingestion scripts |
-| Qdrant | N/A | Same as Orchestrator | embedded | Orchestrator (in-process) |
+All Docker services bind to `BIND_ADDR` (default `127.0.0.1`). For multi-host,
+set `BIND_ADDR=0.0.0.0` in `.env` on each host.
+
+| Service | Port | Host | Accessed by |
+|---|---|---|---|
+| Caddy | 80/443 | Gateway | All clients |
+| Open WebUI | 3000 | Any | Caddy, direct |
+| Orchestrator | 8081 | Desktop | Open WebUI, Caddy, OpenCode |
+| Falcon3 | 8080 | Inference host (CPU) | Orchestrator |
+| Kiwix | 8888 | NAS/Desktop | Caddy (browsing), ingestion scripts |
+| Qdrant | N/A | Same as Orchestrator | Orchestrator (in-process, embedded) |
 
 ## Adding a New Service Host
 

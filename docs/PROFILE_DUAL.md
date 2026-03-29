@@ -138,7 +138,7 @@ Plenty of headroom on both sides.
 
 ```bash
 make setup              # select "dual" when prompted
-make build              # builds both LLM images (~20-40 min first time)
+make build              # builds both LLM images (~10-20 min first time)
 make up                 # start all 5 services
 make health             # verify [OK] for all services including both LLMs
 ```

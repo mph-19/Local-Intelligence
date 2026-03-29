@@ -12,7 +12,7 @@
 #   docker compose build --build-arg MODEL_FILE=Qwen3.5-9B-Q2_K.gguf qwen
 
 # ── Stage 1: Build llama.cpp with CUDA ─────────────────────────────
-FROM nvidia/cuda:12.6.1-devel-ubuntu24.04 AS builder
+FROM nvidia/cuda:13.2.0-devel-ubuntu24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -46,7 +46,7 @@ RUN git clone https://github.com/ggerganov/llama.cpp.git . && \
     rm -rf /build/.git /build/build /build/src /build/ggml
 
 # ── Stage 2: Download model ────────────────────────────────────────
-FROM python:3.12-slim AS downloader
+FROM python:3.14-slim AS downloader
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install huggingface-hub~=1.7.0
@@ -57,11 +57,8 @@ ARG MODEL_FILE=Qwen3.5-9B-Q4_K_M.gguf
 RUN python3 -c "from huggingface_hub import hf_hub_download; \
     hf_hub_download('${MODEL_REPO}', '${MODEL_FILE}', local_dir='/models')"
 
-# Write the filename so the entrypoint can find it
-RUN echo "/models/${MODEL_FILE}" > /model_path.txt
-
 # ── Stage 3: Runtime ───────────────────────────────────────────────
-FROM nvidia/cuda:12.6.1-runtime-ubuntu24.04
+FROM nvidia/cuda:13.2.0-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -77,7 +74,16 @@ RUN ldconfig 2>/dev/null; true
 
 # Copy model
 COPY --from=downloader /models/ /models/
-COPY --from=downloader /model_path.txt /model_path.txt
+
+# Propagate model filename from build arg to runtime env.
+# This avoids shell command substitution ($(cat ...)) in the ENTRYPOINT.
+ARG MODEL_FILE=Qwen3.5-9B-Q4_K_M.gguf
+ENV MODEL_PATH=/models/${MODEL_FILE}
+
+# Non-root user — llama-server needs no write access.
+# GID/UID 1000 may already exist in the NVIDIA base image; skip creation if so.
+RUN if ! getent group 1000 >/dev/null; then groupadd --gid 1000 llmuser; fi && \
+    if ! id -u 1000 >/dev/null 2>&1; then useradd --uid 1000 --gid 1000 --no-create-home llmuser; fi
 
 EXPOSE 8082
 
@@ -85,9 +91,10 @@ ENV CTX_SIZE=8192
 ENV PORT=8082
 ENV GPU_LAYERS=99
 
+USER 1000
 ENTRYPOINT ["sh", "-c", \
     "exec llama-server \
-        --model $(cat /model_path.txt) \
+        --model \"${MODEL_PATH}\" \
         --host 0.0.0.0 \
         --port ${PORT} \
         --n-gpu-layers ${GPU_LAYERS} \

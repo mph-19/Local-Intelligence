@@ -1,16 +1,27 @@
 # Falcon3 (1.58-bit) — CPU-only inference server
-# Multi-stage build: compile bitnet.cpp in a fat image, run in a slim one.
+# 3-stage build: compile bitnet.cpp, download pre-built GGUF, run in slim image.
+#
+# This Dockerfile skips the slow GGUF conversion (~30+ min) by downloading a
+# pre-converted GGUF from HuggingFace. The binary is built via setup_env.py
+# with prepare_model() patched out — preserving codegen and compile steps.
 #
 # Build args:
-#   MODEL_REPO   HuggingFace repo (default: tiiuae/Falcon3-10B-Instruct-1.58bit)
+#   MODEL_REPO   HuggingFace model for kernel codegen (default: tiiuae/Falcon3-10B-Instruct-1.58bit)
 #   MODEL_QUANT  Quantization type (default: i2_s)
+#   GGUF_REPO    HuggingFace repo with pre-built GGUF (default: tiiuae/Falcon3-10B-Instruct-1.58bit-GGUF)
+#   GGUF_FILE    GGUF filename to download (default: ggml-model-i2_s.gguf)
 #
-# Also works with smaller models:
-#   docker build --build-arg MODEL_REPO=tiiuae/Falcon3-3B-Instruct-1.58bit .
-#   docker build --build-arg MODEL_REPO=tiiuae/Falcon3-1B-Instruct-1.58bit .
+# Smaller models:
+#   docker build \
+#     --build-arg MODEL_REPO=tiiuae/Falcon3-3B-Instruct-1.58bit \
+#     --build-arg GGUF_REPO=tiiuae/Falcon3-3B-Instruct-1.58bit-GGUF \
+#     .
+#   docker build \
+#     --build-arg MODEL_REPO=tiiuae/Falcon3-1B-Instruct-1.58bit \
+#     --build-arg GGUF_REPO=tiiuae/Falcon3-1B-Instruct-1.58bit-GGUF \
+#     .
 
-# ── Stage 1: Build bitnet.cpp ──────────────────────────────────────────
-# Compiles the inference binary only — no model weights in this stage.
+# ── Stage 1: Build bitnet.cpp binary (codegen + compile, no model) ──
 FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -40,11 +51,23 @@ RUN git clone --recursive https://github.com/microsoft/BitNet.git . && \
 # ── Patches for BitNet build issues ────────────────────────────────
 # Fix 1: Relax sentencepiece pin (0.2.0 fails on newer Python, 0.2.1+ works)
 RUN sed -i 's/sentencepiece = ">=0.1.98,<=0.2.0"/sentencepiece = ">=0.1.98"/' \
-    3rdparty/llama.cpp/gguf-py/pyproject.toml 2>/dev/null; true
+    3rdparty/llama.cpp/gguf-py/pyproject.toml 2>/dev/null; \
+    echo "[patch] sentencepiece: $(grep -c '>=0.1.98"' 3rdparty/llama.cpp/gguf-py/pyproject.toml 2>/dev/null || echo 0) match(es)"
 
 # Fix 2: const-correctness error in ggml-bitnet-mad.cpp (Clang 18+ is stricter)
 RUN sed -i 's/int8_t \* y_col = y + col \* by;/const int8_t * y_col = y + col * by;/' \
-    src/ggml-bitnet-mad.cpp 2>/dev/null; true
+    src/ggml-bitnet-mad.cpp 2>/dev/null; \
+    echo "[patch] const-correctness: $(grep -c 'const int8_t \* y_col' src/ggml-bitnet-mad.cpp 2>/dev/null || echo 0) match(es)"
+
+# Fix 3: Skip prepare_model() — we download a pre-built GGUF in stage 2 instead
+# of running the slow HF download + GGUF conversion inside setup_env.py.
+# This preserves setup_gguf(), gen_code(), and compile() which are needed to
+# generate optimized ternary kernels and build llama-server.
+# Pattern uses [[:space:]]* to match any indentation (tabs, 2-space, 4-space).
+RUN sed -i 's/^[[:space:]]*prepare_model().*/    pass  # skipped — using pre-built GGUF from stage 2/' \
+    setup_env.py && \
+    grep -q 'skipped — using pre-built GGUF' setup_env.py || \
+    { echo "ERROR: Failed to patch prepare_model() out of setup_env.py — build would be very slow"; exit 1; }
 
 RUN python3 -m venv /build/venv
 ENV PATH="/build/venv/bin:$PATH"
@@ -55,18 +78,32 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 ARG MODEL_REPO=tiiuae/Falcon3-10B-Instruct-1.58bit
 ARG MODEL_QUANT=i2_s
 
+# Runs: setup_gguf() → gen_code() → compile() → (skipped) prepare_model()
+# gen_code() generates optimized lookup-table kernel headers for the target
+# CPU architecture (TL2 for x86_64, TL1 for ARM). compile() builds llama-server
+# with those kernels baked in. This takes ~5-10 min (vs 30+ with conversion).
 RUN python3 setup_env.py --hf-repo ${MODEL_REPO} -q ${MODEL_QUANT}
 
-# Collect only what the runtime needs, then delete everything else.
-# This drastically reduces the layer size BuildKit has to compress.
+# Collect only what the runtime needs.
 RUN mkdir -p /output/libs && \
     cp /build/build/bin/llama-server /output/ && \
-    find /build/build -name "*.so*" -exec cp {} /output/libs/ \; 2>/dev/null; true && \
-    find /build/models -name "ggml-model-*.gguf" -type f | head -1 > /output/model_path.txt && \
-    cp -r /build/models/ /output/models/ && \
-    rm -rf /build/.git /build/3rdparty /build/build /build/venv /build/src
+    find /build/build -name "*.so*" -exec cp {} /output/libs/ \; 2>/dev/null; true
 
-# ── Stage 2: Runtime ─────────────────────────────────────────────────
+# ── Stage 2: Download pre-built GGUF ────────────────────────────────
+# Runs in parallel with stage 1 via BuildKit. Downloads ~2 GB.
+FROM python:3.14-slim AS downloader
+
+RUN pip install --no-cache-dir huggingface-hub
+
+ARG GGUF_REPO=tiiuae/Falcon3-10B-Instruct-1.58bit-GGUF
+ARG GGUF_FILE=ggml-model-i2_s.gguf
+
+RUN python -c "\
+from huggingface_hub import hf_hub_download; \
+hf_hub_download(repo_id='${GGUF_REPO}', filename='${GGUF_FILE}', \
+    local_dir='/model', local_dir_use_symlinks=False)"
+
+# ── Stage 3: Runtime ─────────────────────────────────────────────────
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -77,13 +114,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /output/llama-server /usr/local/bin/llama-server
-COPY --from=builder /output/models/ /models/
-COPY --from=builder /output/model_path.txt /model_path.txt
 COPY --from=builder /output/libs/ /usr/local/lib/
 RUN ldconfig
 
-# Rewrite the model path to point at /models/ instead of /build/models/
-RUN sed -i 's|/build/models/|/models/|' /model_path.txt
+ARG GGUF_FILE=ggml-model-i2_s.gguf
+COPY --from=downloader /model/${GGUF_FILE} /model/model.gguf
+
+# Non-root user — llama-server needs no write access.
+# GID/UID 1000 may already exist in the base image; skip creation if so.
+RUN if ! getent group 1000 >/dev/null; then groupadd --gid 1000 llmuser; fi && \
+    if ! id -u 1000 >/dev/null 2>&1; then useradd --uid 1000 --gid 1000 --no-create-home llmuser; fi
 
 EXPOSE 8080
 
@@ -91,10 +131,10 @@ ENV CTX_SIZE=32768
 ENV THREADS=0
 ENV PORT=8080
 
-# Entrypoint reads the model path dynamically — works with any MODEL_REPO
+USER 1000
 ENTRYPOINT ["sh", "-c", \
     "exec llama-server \
-        --model $(cat /model_path.txt) \
+        --model /model/model.gguf \
         --host 0.0.0.0 \
         --port ${PORT} \
         --n-gpu-layers 0 \

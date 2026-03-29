@@ -7,15 +7,19 @@ LLM inference — fronted by a reverse proxy and exposed through Open WebUI.
 
 ## Quick Start
 
+Requires **Docker Compose v2.20+** (`docker compose version` to check).
+
 ```bash
 git clone https://github.com/mph-19/local-intelligence.git
 cd local-intelligence
 make setup          # detects your hardware, picks the right profile
-make build          # builds Docker images (15-30 min first time)
+make build          # builds Docker images (~5-10 min first time)
 make up             # starts all services
 ```
 
-Open http://localhost:3000 — first login creates an admin account.
+Open http://localhost:3000 — first login creates an admin account. Signup is
+disabled by default after the first user registers (set `ENABLE_SIGNUP=true`
+in `.env` to allow additional users).
 
 New to Docker? See **[docs/DOCKER_BEGINNER.md](docs/DOCKER_BEGINNER.md)**.
 
@@ -48,7 +52,7 @@ You ask a question
         ▼
 ┌─ Orchestrator (:8081) ────────────────────────────┐
 │                                                    │
-│  1. Classify the query (code? factual? general?)   │
+│  1. Classify the query (weighted keyword scoring)   │
 │  2. Retrieve relevant chunks from Qdrant           │
 │  3. Fall back to Kiwix fulltext if needed          │
 │  4. [dual only] Falcon3 triages the chunks (CPU)   │
@@ -77,10 +81,12 @@ Answer with sources, displayed in Open WebUI
 
 ```bash
 make setup          # configure hardware profile
-make build          # build/rebuild Docker images
-make up             # start all services
+make build          # build images for active profile only
+make up             # start all services (checks port availability first)
 make down           # stop all services
 make health         # check service status
+make wait-healthy   # poll until all services respond (or timeout)
+make check-ports    # verify configured ports are free on host
 make logs           # stream live logs (Ctrl+C to stop)
 make chat Q="..."   # quick test from the command line
 make ingest-docs    # index your documents into Qdrant
@@ -114,7 +120,8 @@ bash scripts/install.sh
 
 Handles system deps, Python venv, bitnet.cpp build, model download, directory
 structure, and systemd services. Works on Linux (x86_64, ARM64) and macOS
-(Intel, Apple Silicon). See `--help` for options.
+(Intel, Apple Silicon). Pre-checks disk space, auto-detects model paths, and
+supports `--no-model` for build-only installs. See `--help` for options.
 
 ## License
 
