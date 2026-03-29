@@ -184,8 +184,8 @@ services:
           exec kiwix-serve --library /knowledge/kiwix-library.xml --port 8888 --nodatealias
         else
           echo "No ZIM files found in /knowledge/zim/ — Kiwix idle."
-          echo "Download ZIMs, then restart: docker compose restart kiwix"
-          sleep infinity
+          echo "Add ZIM files to /knowledge/zim/ and Kiwix will start automatically."
+          exit 0
         fi
     restart: unless-stopped
     healthcheck:
