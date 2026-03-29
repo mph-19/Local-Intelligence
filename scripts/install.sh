@@ -321,8 +321,11 @@ build_bitnet() {
         MODEL_NAME="$(basename "$MODEL_REPO")"
         GGUF_REPO="${MODEL_REPO}-GGUF"
         pip install --quiet huggingface-hub
-        huggingface-cli download "$GGUF_REPO" "ggml-model-${MODEL_QUANT}.gguf" \
-            --local-dir "models/${MODEL_NAME}"
+        python3 -c "
+from huggingface_hub import hf_hub_download
+hf_hub_download(repo_id='${GGUF_REPO}', filename='ggml-model-${MODEL_QUANT}.gguf',
+    local_dir='models/${MODEL_NAME}')
+"
         ok "Falcon3 GGUF downloaded to models/${MODEL_NAME}/"
     fi
 

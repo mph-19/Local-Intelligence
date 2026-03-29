@@ -59,8 +59,12 @@ sed -i 's/^    prepare_model()/    pass  # skipped/' setup_env.py
 python setup_env.py --hf-repo tiiuae/Falcon3-10B-Instruct-1.58bit -q i2_s
 #   Step 2: Download pre-built GGUF (~2 GB)
 pip install huggingface-hub
-huggingface-cli download tiiuae/Falcon3-10B-Instruct-1.58bit-GGUF \
-    ggml-model-i2_s.gguf --local-dir models/Falcon3-10B-Instruct-1.58bit
+python3 -c "
+from huggingface_hub import hf_hub_download
+hf_hub_download(repo_id='tiiuae/Falcon3-10B-Instruct-1.58bit-GGUF',
+    filename='ggml-model-i2_s.gguf',
+    local_dir='models/Falcon3-10B-Instruct-1.58bit')
+"
 ```
 
 Both options produce the same result: a `llama-server` binary with optimized

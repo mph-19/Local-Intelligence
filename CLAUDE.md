@@ -136,11 +136,14 @@ local-intelligence/
 - **Container memory limits**: Every service has a `deploy.resources.limits.memory`
   cap — falcon3 12g, falcon3-mini 4g, orchestrator 2g, open-webui 1g,
   kiwix 512m, ingest 2g. Prevents a leak from OOM-killing unrelated services.
-- **Non-root containers**: All custom Dockerfiles run as non-root. The
-  orchestrator and ingest use `appuser` (UID 1000), Falcon3 and Qwen use
-  `llmuser` (UID 1000). Binaries and model files are root-owned and read-only
-  to the runtime user. Files on bind-mounted volumes are owned by UID 1000
-  (matching the typical host user), avoiding permission conflicts.
+- **Non-root containers**: All custom Dockerfiles run as non-root via
+  `USER 1000`. User/group creation is conditional (`getent`/`id` checks
+  before `groupadd`/`useradd`) so builds succeed even when the base image
+  already has UID/GID 1000. All `chown`, `--chown`, and `USER` directives
+  use numeric IDs (not names) for the same reason. Binaries and model files
+  are root-owned and read-only to the runtime user. Files on bind-mounted
+  volumes are owned by UID 1000 (matching the typical host user), avoiding
+  permission conflicts.
 - **Localhost-only port binding**: All Docker port mappings use
   `${BIND_ADDR:-127.0.0.1}` so services are only reachable from the host by
   default. Set `BIND_ADDR=0.0.0.0` in `.env` for LAN/multi-host access.
