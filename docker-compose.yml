@@ -173,18 +173,15 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        # Auto-generate library XML from any ZIM files present
-        if [ ! -f /knowledge/kiwix-library.xml ] && ls /knowledge/zim/*.zim >/dev/null 2>&1; then
-          echo "Auto-generating kiwix-library.xml..."
+        if ls /knowledge/zim/*.zim >/dev/null 2>&1; then
+          echo "Rebuilding kiwix-library.xml from ZIMs..."
+          rm -f /knowledge/kiwix-library.xml
           for zim in /knowledge/zim/*.zim; do
             kiwix-manage /knowledge/kiwix-library.xml add "$$zim" 2>/dev/null || true
           done
-        fi
-        if [ -f /knowledge/kiwix-library.xml ]; then
           exec kiwix-serve --library /knowledge/kiwix-library.xml --port 8888 --nodatealias
         else
-          echo "No ZIM files found in /knowledge/zim/ — Kiwix idle."
-          echo "Add ZIM files to /knowledge/zim/ and Kiwix will start automatically."
+          echo "No ZIM files in /knowledge/zim/ — add one with: make kiwix-add URL=..."
           exit 0
         fi
     restart: unless-stopped

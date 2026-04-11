@@ -22,6 +22,7 @@ restart: ## Restart all services
 .PHONY: build
 build: ## Build images for the active profile (sequentially to avoid OOM)
 	@. ./.env 2>/dev/null; \
+	export COMPOSE_BAKE=false; \
 	profile="$${COMPOSE_PROFILES:-cpu}"; \
 	echo "Building for profile: $$profile"; \
 	case "$$profile" in \
@@ -86,6 +87,37 @@ ingest-docs: ## Index local documents from KNOWLEDGE_DIR/docs/custom
 ingest-kiwix: ## Index Kiwix articles (usage: make ingest-kiwix QUERY="python" BOOK="wikipedia")
 	$(COMPOSE) run --rm ingest python ingest_kiwix.py \
 		$${BOOK:-wikipedia} "$${QUERY:-python programming}" $${COLLECTION:-wikipedia}
+
+# ── Kiwix ────────────────────────────────────────────────────────────
+
+.PHONY: kiwix-add
+kiwix-add: ## Download a ZIM and refresh Kiwix (usage: make kiwix-add URL=https://...)
+	@if [ -z "$(URL)" ]; then \
+		echo "Usage: make kiwix-add URL=https://download.kiwix.org/zim/.../file.zim"; \
+		echo "Browse available ZIMs at https://library.kiwix.org"; \
+		exit 1; \
+	fi
+	@. ./.env 2>/dev/null; \
+	dir=$${KNOWLEDGE_DIR:-./data/knowledge}/zim; \
+	mkdir -p "$$dir"; \
+	echo "Downloading to $$dir ..."; \
+	wget -c -P "$$dir" "$(URL)"
+	@$(MAKE) kiwix-refresh
+
+.PHONY: kiwix-refresh
+kiwix-refresh: ## Rebuild Kiwix library from ZIMs on disk and restart
+	$(COMPOSE) restart kiwix
+
+.PHONY: kiwix-list
+kiwix-list: ## List ZIM files currently installed
+	@. ./.env 2>/dev/null; \
+	dir=$${KNOWLEDGE_DIR:-./data/knowledge}/zim; \
+	if ls "$$dir"/*.zim >/dev/null 2>&1; then \
+		ls -lh "$$dir"/*.zim; \
+	else \
+		echo "No ZIM files in $$dir"; \
+		echo "Add one with: make kiwix-add URL=<zim-url>"; \
+	fi
 
 # ── Monitoring ───────────────────────────────────────────────────────
 
