@@ -22,7 +22,7 @@
 #     .
 
 # ── Stage 1: Build bitnet.cpp binary (codegen + compile, no model) ──
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:26.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -104,7 +104,7 @@ hf_hub_download(repo_id='${GGUF_REPO}', filename='${GGUF_FILE}', \
     local_dir='/model', local_dir_use_symlinks=False)"
 
 # ── Stage 3: Runtime ─────────────────────────────────────────────────
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
